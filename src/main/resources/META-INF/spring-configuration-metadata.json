@@ -1,0 +1,21 @@
+{
+  "groups": [
+    {
+      "name": "app.jwt",
+      "type": "com.example.alquiler_de_vehiculos.config.JwtProperties",
+      "sourceType": "com.example.alquiler_de_vehiculos.config.JwtProperties"
+    }
+  ],
+  "properties": [
+    {
+      "name": "app.jwt.secret",
+      "type": "java.lang.String",
+      "description": "Clave secreta para firmar los tokens JWT."
+    },
+    {
+      "name": "app.jwt.expiration-ms",
+      "type": "java.lang.Long",
+      "description": "Tiempo de expiracion del token JWT en milisegundos."
+    }
+  ]
+}
