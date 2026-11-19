@@ -12,5 +12,7 @@ public record RegistrarPagoRequest(
         String ultimosDigitos,
         String numeroOperacion,
         String bancoOrigen,
-        Boolean garantiaConfirmada
+        Boolean garantiaConfirmada,
+        String marcaTarjeta,
+        String numeroAutorizacion
 ) {}

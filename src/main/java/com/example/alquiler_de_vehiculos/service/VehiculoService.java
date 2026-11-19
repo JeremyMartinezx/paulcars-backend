@@ -55,6 +55,8 @@ public class VehiculoService {
     private final CombustibleRepository combustibleRepository;
     private final EstadoVehiculoRepository estadoRepository;
     private final AlquilerRepository alquilerRepository;
+    private final CancelacionService cancelacionService;
+    private final com.example.alquiler_de_vehiculos.config.PoliticaCancelacionProperties politica;
     private final Path carpetaImagenes;
 
     public VehiculoService(VehiculoModeloRepository vehiculoModeloRepository,
@@ -64,7 +66,11 @@ public class VehiculoService {
                            CombustibleRepository combustibleRepository,
                            EstadoVehiculoRepository estadoRepository,
                            AlquilerRepository alquilerRepository,
+                           CancelacionService cancelacionService,
+                           com.example.alquiler_de_vehiculos.config.PoliticaCancelacionProperties politica,
                            @Value("${app.uploads.dir:uploads}") String carpetaUploads) {
+        this.cancelacionService = cancelacionService;
+        this.politica = politica;
         this.vehiculoModeloRepository = vehiculoModeloRepository;
         this.vehiculoUnidadRepository = vehiculoUnidadRepository;
         this.marcaRepository = marcaRepository;
@@ -102,6 +108,9 @@ public class VehiculoService {
         if (modelo.getActivo() == null) {
             modelo.setActivo(true);
         }
+        if (modelo.getKmMantenimiento() == null || modelo.getKmMantenimiento() <= 0) {
+            modelo.setKmMantenimiento(VehiculoUnidad.KM_MANTENIMIENTO_POR_DEFECTO);
+        }
         asignarCatalogos(modelo);
         List<ImagenVehiculo> fotos = modelo.getImagenes() != null ? new ArrayList<>(modelo.getImagenes()) : new ArrayList<>();
         modelo.setImagenes(new LinkedHashSet<>());
@@ -120,6 +129,9 @@ public class VehiculoService {
         if (detalles.getAnio() != null && detalles.getAnio() > 1900) {
             modelo.setAnio(detalles.getAnio());
         }
+        if (detalles.getColorPropio() != null && !detalles.getColorPropio().isBlank()) {
+            modelo.setColorPropio(detalles.getColorPropio());
+        }
         if (detalles.getPrecioDia() != null) {
             modelo.setPrecioDia(detalles.getPrecioDia());
         }
@@ -135,6 +147,9 @@ public class VehiculoService {
         }
         if (detalles.getActivo() != null) {
             modelo.setActivo(detalles.getActivo());
+        }
+        if (detalles.getKmMantenimiento() != null && detalles.getKmMantenimiento() > 0) {
+            modelo.setKmMantenimiento(detalles.getKmMantenimiento());
         }
         if (detalles.getSede() != null && !detalles.getSede().isBlank()) {
             modelo.setSede(detalles.getSede());
@@ -179,6 +194,33 @@ public class VehiculoService {
                     u.setColor(colorModelo);
                 }
             }
+        }
+        for (VehiculoUnidad u : unidades) {
+            alquilerEnCurso(u.getIdUnidad()).ifPresent(a -> {
+                // Una unidad con un cliente siempre figura como alquilada: si el estado quedó desactualizado, se corrige
+                if (!"EN_RUTA".equalsIgnoreCase(etiquetaEstadoActual(u))) {
+                    u.setEstado(estadoRepository.findByNombreEstadoIgnoreCase("EN_RUTA")
+                            .orElseGet(() -> estadoRepository.save(new EstadoVehiculo(null, "EN_RUTA"))));
+                    vehiculoUnidadRepository.save(u);
+                }
+                u.setIdAlquilerActual(a.getIdAlquiler());
+                u.setAlquiladaA(a.getCliente() != null
+                        ? (a.getCliente().getNombres() + " " + a.getCliente().getApellidos()).trim() : null);
+            });
+        }
+        // Agenda de la placa: su próxima reserva aprobada (todavía sin entregar) y si el recojo está cerca
+        java.time.LocalDateTime ahora = java.time.LocalDateTime.now();
+        for (VehiculoUnidad u : unidades) {
+            proximaReserva(u.getIdUnidad()).ifPresent(a -> {
+                java.time.LocalDateTime recojo = recojoDe(a);
+                u.setProximaReserva(recojo);
+                u.setIdProximaReserva(a.getIdAlquiler());
+                boolean cercana = !recojo.isAfter(ahora.plusHours(politica.getHorasReservaBloqueaLimpieza()));
+                u.setReservaProximaBloquea(cercana);
+                if (cercana) {
+                    u.setReemplazoDisponible(cancelacionService.hayReemplazo(u, ahora.plusHours(politica.getHorasReservaBloqueaLimpieza())));
+                }
+            });
         }
         unidades.sort((a, b) -> {
             int pA = getPrioridadEstado(a.getEstado() != null ? a.getEstado().getNombreEstado() : "");
@@ -227,7 +269,7 @@ public class VehiculoService {
             unidad.setNumeroMotor("MTR-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase());
         }
         unidad.setColor(modelo.getColor());
-        if (unidad.getKilometraje() == null) {
+        if (unidad.getKilometraje() == null || unidad.getKilometraje() < 0) {
             unidad.setKilometraje(0);
         }
         if (unidad.getSede() == null || unidad.getSede().isBlank()) {
@@ -254,17 +296,101 @@ public class VehiculoService {
             unidad.setPlaca(placa);
         }
         if (datos.getColor() != null) unidad.setColor(datos.getColor());
-        if (datos.getKilometraje() != null) unidad.setKilometraje(datos.getKilometraje());
+        if (datos.getKilometraje() != null && datos.getKilometraje() >= 0) unidad.actualizarKilometraje(datos.getKilometraje());
         if (datos.getNumeroVin() != null) unidad.setNumeroVin(datos.getNumeroVin());
         if (datos.getNumeroMotor() != null) unidad.setNumeroMotor(datos.getNumeroMotor());
         if (datos.getSede() != null) unidad.setSede(datos.getSede().toUpperCase());
         if (datos.getEstado() != null && datos.getEstado().getNombreEstado() != null) {
+            validarTransicion(unidad, datos.getEstado().getNombreEstado().toUpperCase());
+            if (Set.of("MANTENIMIENTO", "NO DISPONIBLE").contains(datos.getEstado().getNombreEstado().toUpperCase())) {
+                cancelacionService.reasignarReservasDeUnidad(unidad, java.time.LocalDateTime.now().plusDays(politica.getDiasReasignarPorBaja()));
+            }
             EstadoVehiculo estado = estadoRepository.findByNombreEstadoIgnoreCase(datos.getEstado().getNombreEstado())
                     .orElseGet(() -> estadoRepository.save(new EstadoVehiculo(null, datos.getEstado().getNombreEstado())));
+            if (salioDeMantenimiento(unidad, estado)) unidad.registrarMantenimientoRealizado();
             unidad.setEstado(estado);
         }
 
         return vehiculoUnidadRepository.save(unidad);
+    }
+
+    // ───── Flujo de estados de una unidad ─────
+    // Alquilado lo pone y lo quita el sistema (al entregar y al recibir). El administrador solo mueve la unidad entre estos:
+    //   Disponible ⇄ Limpieza        Disponible/Limpieza → Mantenimiento        Mantenimiento → Limpieza (servicio hecho) → Disponible
+    private static final Map<String, Set<String>> TRANSICIONES = Map.of(
+            "DISPONIBLE", Set.of("LIMPIEZA", "MANTENIMIENTO", "NO DISPONIBLE"),
+            "LIMPIEZA", Set.of("DISPONIBLE", "MANTENIMIENTO", "NO DISPONIBLE"),
+            "MANTENIMIENTO", Set.of("LIMPIEZA", "NO DISPONIBLE"),
+            "NO DISPONIBLE", Set.of("LIMPIEZA", "MANTENIMIENTO"));
+
+    private static String etiquetaEstado(String e) {
+        return switch (e) {
+            case "DISPONIBLE" -> "Disponible";
+            case "LIMPIEZA" -> "Limpieza";
+            case "MANTENIMIENTO" -> "Mantenimiento";
+            case "NO DISPONIBLE" -> "No disponible";
+            case "EN_RUTA", "ALQUILADO" -> "Alquilado";
+            default -> e;
+        };
+    }
+
+    /** El alquiler en curso (llaves entregadas y todavía no recibidas) de una unidad, si lo tiene. */
+    private Optional<com.example.alquiler_de_vehiculos.model.Alquiler> alquilerEnCurso(Integer idUnidad) {
+        if (idUnidad == null) return Optional.empty();
+        return alquilerRepository.findByVehiculoUnidad_IdUnidad(idUnidad).stream()
+                .filter(a -> a.getFechaFinReal() == null && a.getEstado() != null
+                        && Set.of("ACTIVO", "EN_CURSO").contains(a.getEstado().getNombreEstado().toUpperCase()))
+                .findFirst();
+    }
+
+    private static java.time.LocalDateTime recojoDe(com.example.alquiler_de_vehiculos.model.Alquiler a) {
+        java.time.LocalTime hora = java.time.LocalTime.of(10, 0);
+        try {
+            if (a.getHoraRecojo() != null && !a.getHoraRecojo().isBlank()) hora = java.time.LocalTime.parse(a.getHoraRecojo().trim());
+        } catch (java.time.format.DateTimeParseException ignorada) {
+            // hora con formato inesperado: se usa la hora por defecto
+        }
+        return a.getFechaInicio().atTime(hora);
+    }
+
+    /** La reserva aprobada, todavía sin entregar, que se recoge primero (si tiene). */
+    private Optional<com.example.alquiler_de_vehiculos.model.Alquiler> proximaReserva(Integer idUnidad) {
+        if (idUnidad == null) return Optional.empty();
+        return alquilerRepository.findByVehiculoUnidad_IdUnidad(idUnidad).stream()
+                .filter(a -> a.getFechaFinReal() == null && a.getFechaEntrega() == null && a.getFechaInicio() != null
+                        && a.getEstado() != null
+                        && Set.of("RESERVADO", "PAGADO", "CONFIRMADO").contains(a.getEstado().getNombreEstado().toUpperCase()))
+                .min(java.util.Comparator.comparing(VehiculoService::recojoDe));
+    }
+
+    private void validarTransicion(VehiculoUnidad unidad, String destino) {
+        String actual = unidad.getEstado() != null && unidad.getEstado().getNombreEstado() != null
+                ? unidad.getEstado().getNombreEstado().toUpperCase() : "DISPONIBLE";
+        if (actual.equals(destino)) return;
+
+        if ("EN_RUTA".equals(destino) || "ALQUILADO".equals(destino)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "El estado «Alquilado» lo asigna el sistema al entregar las llaves; no se puede elegir manualmente.");
+        }
+        boolean marcadaAlquilada = "EN_RUTA".equals(actual) || "ALQUILADO".equals(actual);
+        if (marcadaAlquilada) {
+            // Si de verdad está con un cliente no se toca (se controla antes); si no hay contrato, el estado era un error y se regulariza
+            Set<String> regularizar = Set.of("LIMPIEZA", "DISPONIBLE", "MANTENIMIENTO", "NO DISPONIBLE");
+            if (!regularizar.contains(destino)) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "Estado no permitido para esta unidad.");
+            }
+        } else if (!TRANSICIONES.getOrDefault(actual, Set.of()).contains(destino)) {
+            String ayuda = "MANTENIMIENTO".equals(actual)
+                    ? " Al terminar el mantenimiento la unidad pasa primero a Limpieza y después a Disponible."
+                    : "";
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "No se puede pasar de " + etiquetaEstado(actual) + " a " + etiquetaEstado(destino) + "." + ayuda);
+        }
+        if ("DISPONIBLE".equals(destino) && unidad.kmRestantesMantenimiento() <= 0) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "La unidad alcanzó su kilometraje de mantenimiento (" + String.format(java.util.Locale.US, "%,d", unidad.kmProximoMantenimiento())
+                            + " km): debe pasar por mantenimiento antes de estar disponible.");
+        }
     }
 
     @Transactional
@@ -275,19 +401,48 @@ public class VehiculoService {
         VehiculoUnidad unidad = vehiculoUnidadRepository.findById(idUnidad)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Unidad física no encontrada"));
 
-        boolean enContrato = alquilerRepository.findByVehiculoUnidad_IdUnidad(idUnidad).stream()
-                .anyMatch(a -> a.getFechaFinReal() == null && a.getEstado() != null
-                        && Set.of("RESERVADO", "ACTIVO", "CONFIRMADO").contains(a.getEstado().getNombreEstado().toUpperCase()));
-        if (enContrato) {
+        final String estadoFinal = "ALQUILADO".equalsIgnoreCase(estadoNuevo) ? "EN_RUTA" : estadoNuevo.toUpperCase();
+
+        // Un carro que está en la calle con un cliente no se puede mover hasta que lo devuelva
+        var enCurso = alquilerEnCurso(idUnidad);
+        if (enCurso.isPresent() && !estadoFinal.equals(etiquetaEstadoActual(unidad))) {
+            var cli = enCurso.get().getCliente();
             throw new ResponseStatusException(HttpStatus.CONFLICT,
-                    "La unidad física tiene un alquiler activo en curso. Primero finaliza o cancela el contrato.");
+                    "La unidad está alquilada" + (cli != null ? " a " + (cli.getNombres() + " " + cli.getApellidos()).trim() : "")
+                            + String.format(" (ALQ-%06d)", enCurso.get().getIdAlquiler())
+                            + ". Primero se debe recibir el vehículo.");
+        }
+        validarTransicion(unidad, estadoFinal);
+        // Si sale de servicio, sus reservas aún no entregadas pasan solas a otra unidad libre del mismo modelo
+        if (Set.of("MANTENIMIENTO", "NO DISPONIBLE").contains(estadoFinal)) {
+            cancelacionService.reasignarReservasDeUnidad(unidad, java.time.LocalDateTime.now().plusDays(politica.getDiasReasignarPorBaja()));
+        } else if ("LIMPIEZA".equals(estadoFinal) && "DISPONIBLE".equals(etiquetaEstadoActual(unidad))) {
+            // La limpieza es corta: las reservas lejanas no se tocan. Las que se recogen pronto pasan solas a otra placa libre;
+            // si no hay otra, la unidad está comprometida y no sale.
+            try {
+                cancelacionService.reasignarReservasDeUnidad(unidad,
+                        java.time.LocalDateTime.now().plusHours(politica.getHorasReservaBloqueaLimpieza()));
+            } catch (ResponseStatusException e) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT,
+                        "La unidad está comprometida con una reserva próxima y no hay otra placa libre del mismo modelo para reemplazarla.");
+            }
         }
 
-        final String estadoFinal = "ALQUILADO".equalsIgnoreCase(estadoNuevo) ? "EN_RUTA" : estadoNuevo.toUpperCase();
         EstadoVehiculo estado = estadoRepository.findByNombreEstadoIgnoreCase(estadoFinal)
                 .orElseGet(() -> estadoRepository.save(new EstadoVehiculo(null, estadoFinal)));
+        if (salioDeMantenimiento(unidad, estado)) unidad.registrarMantenimientoRealizado();
         unidad.setEstado(estado);
         return vehiculoUnidadRepository.save(unidad);
+    }
+
+    // Una unidad que vuelve a estar disponible después de mantenimiento: ya se hizo el servicio, la cuenta de km empieza de nuevo
+    private static String etiquetaEstadoActual(VehiculoUnidad u) {
+        return u.getEstado() != null && u.getEstado().getNombreEstado() != null ? u.getEstado().getNombreEstado().toUpperCase() : "";
+    }
+
+    private boolean salioDeMantenimiento(VehiculoUnidad unidad, EstadoVehiculo nuevo) {
+        return unidad.getEstado() != null && "MANTENIMIENTO".equalsIgnoreCase(unidad.getEstado().getNombreEstado())
+                && nuevo != null && Set.of("LIMPIEZA", "DISPONIBLE").contains(nuevo.getNombreEstado().toUpperCase());
     }
 
     @Transactional

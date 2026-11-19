@@ -17,4 +17,3 @@ public class UploadProperties {
         this.dir = dir;
     }
 }
-

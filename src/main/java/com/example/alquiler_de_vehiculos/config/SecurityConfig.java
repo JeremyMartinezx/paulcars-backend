@@ -117,7 +117,7 @@ public class SecurityConfig {
                 auth.requestMatchers(HttpMethod.POST, "/api/pagos/yape", "/api/pagos/plin", "/api/pagos/tarjeta").permitAll();
 
                 // Área privada del cliente logueado
-                auth.requestMatchers(HttpMethod.GET, "/api/auth/me", "/api/alquileres/mis-alquileres").authenticated();
+                auth.requestMatchers(HttpMethod.GET, "/api/auth/me", "/api/alquileres/mis-alquileres", "/api/cambios").authenticated();
                 auth.requestMatchers(HttpMethod.PUT, "/api/alquileres/*/cancelar").authenticated();
                 auth.requestMatchers("/api/clientes/mi-perfil", "/api/clientes/mi-perfil/**").authenticated();
                 auth.requestMatchers(HttpMethod.POST, "/api/clientes/solicitar-codigo-password", "/api/clientes/cambiar-password").authenticated();
@@ -125,6 +125,17 @@ public class SecurityConfig {
 
                 // Seguridad en pagos: las consultas de pagos por alquiler o cliente requieren autenticación obligatoria
                 auth.requestMatchers("/api/pagos/alquiler/**", "/api/pagos/cliente/**").authenticated();
+
+                // Comprobantes en PDF: cada cliente solo accede a los suyos (se valida la propiedad en el controlador)
+                auth.requestMatchers(HttpMethod.GET, "/api/pagos/*/recibo",
+                        "/api/alquileres/*/comprobante", "/api/alquileres/*/acta-entrega",
+                        "/api/alquileres/*/acta-finalizacion",
+                        // Estado de la devolución y nota de crédito: el cliente ve solo las suyas
+                        "/api/alquileres/*/devolucion", "/api/alquileres/*/notas-credito/*",
+                        // Historial de estados de su propia reserva (se valida la propiedad en el controlador)
+                        "/api/alquileres/*/historial", "/api/alquileres/*/danos").authenticated();
+                auth.requestMatchers(HttpMethod.POST, "/api/pagos/*/recibo/enviar",
+                        "/api/alquileres/*/comprobante/enviar").authenticated();
 
                 // Módulo operacional de reportes del día (Compartido para Counter / Asesor y Admin)
                 auth.requestMatchers("/api/reportes/operativo").hasAnyRole("ADMIN", "EMPLEADO");

@@ -22,6 +22,7 @@ import jakarta.validation.constraints.NotBlank;
 @Setter
 @NoArgsConstructor
 @Entity
+@jakarta.persistence.EntityListeners(com.example.alquiler_de_vehiculos.service.CambiosListener.class)
 @Table(name = "Clientes")
 public class Cliente {
 

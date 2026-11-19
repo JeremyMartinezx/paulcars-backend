@@ -11,9 +11,10 @@ public record TransaccionPagoResponse(
     BigDecimal monto,
     String fecha,
     Integer idAlquiler,
-    String nuevoEstado
+    String nuevoEstado,
+    Integer idPago
 ) {
-    public static TransaccionPagoResponse exitoso(String transactionId, String message, String metodo, BigDecimal monto, Integer idAlquiler, String nuevoEstado) {
-        return new TransaccionPagoResponse("PAID", transactionId, message, metodo, monto, LocalDateTime.now().toString(), idAlquiler, nuevoEstado);
+    public static TransaccionPagoResponse exitoso(String transactionId, String message, String metodo, BigDecimal monto, Integer idAlquiler, String nuevoEstado, Integer idPago) {
+        return new TransaccionPagoResponse("PAID", transactionId, message, metodo, monto, LocalDateTime.now().toString(), idAlquiler, nuevoEstado, idPago);
     }
 }

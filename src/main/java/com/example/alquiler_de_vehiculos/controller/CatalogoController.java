@@ -3,6 +3,7 @@ package com.example.alquiler_de_vehiculos.controller;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -77,6 +78,34 @@ public class CatalogoController {
         catalogos.put("metodosPago", metodoPagoRepository.findAll());
         catalogos.put("roles", rolRepository.findAll());
         return catalogos;
+    }
+
+    @DeleteMapping("/marcas/{id}")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<Void> eliminarMarca(@PathVariable Integer id) {
+        catalogoService.eliminarMarca(id);
+        return ResponseEntity.noContent().build();
+    }
+
+    @DeleteMapping("/modelos/{id}")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<Void> eliminarModelo(@PathVariable Integer id) {
+        catalogoService.eliminarModelo(id);
+        return ResponseEntity.noContent().build();
+    }
+
+    @DeleteMapping("/tipos-vehiculo/{id}")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<Void> eliminarTipoVehiculo(@PathVariable Integer id) {
+        catalogoService.eliminarTipoVehiculo(id);
+        return ResponseEntity.noContent().build();
+    }
+
+    @DeleteMapping("/combustibles/{id}")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<Void> eliminarCombustible(@PathVariable Integer id) {
+        catalogoService.eliminarCombustible(id);
+        return ResponseEntity.noContent().build();
     }
 
     @GetMapping("/marcas")

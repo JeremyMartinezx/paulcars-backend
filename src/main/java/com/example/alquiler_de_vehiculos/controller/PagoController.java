@@ -4,6 +4,10 @@ import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
 
+import org.springframework.http.ContentDisposition;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.Authentication;
 import com.example.alquiler_de_vehiculos.security.SecurityUtils;
@@ -21,6 +25,7 @@ import com.example.alquiler_de_vehiculos.dto.TransaccionPagoResponse;
 import com.example.alquiler_de_vehiculos.dto.YapePagoRequest;
 import com.example.alquiler_de_vehiculos.model.Pago;
 import com.example.alquiler_de_vehiculos.repository.AlquilerRepository;
+import com.example.alquiler_de_vehiculos.service.ComprobanteService;
 import com.example.alquiler_de_vehiculos.service.PagoService;
 
 import jakarta.validation.Valid;
@@ -32,11 +37,14 @@ public class PagoController {
     private final PagoService pagoService;
     private final AlquilerRepository alquilerRepository;
     private final SecurityUtils securityUtils;
+    private final ComprobanteService comprobanteService;
 
-    public PagoController(PagoService pagoService, AlquilerRepository alquilerRepository, SecurityUtils securityUtils) {
+    public PagoController(PagoService pagoService, AlquilerRepository alquilerRepository, SecurityUtils securityUtils,
+                          ComprobanteService comprobanteService) {
         this.pagoService = pagoService;
         this.alquilerRepository = alquilerRepository;
         this.securityUtils = securityUtils;
+        this.comprobanteService = comprobanteService;
     }
 
     private String validarPropietario(Authentication auth) {
@@ -87,5 +95,29 @@ public class PagoController {
     @PreAuthorize("hasAnyRole('ADMIN','EMPLEADO')")
     public List<Pago> listarPagos() {
         return pagoService.listarPagos();
+    }
+
+    // ── Recibo de pago en PDF ──
+
+    @GetMapping("/{idPago}/recibo")
+    public ResponseEntity<byte[]> descargarRecibo(@PathVariable("idPago") Integer idPago) {
+        Pago pago = comprobanteService.buscarPago(idPago);
+        securityUtils.validarAccesoAlquiler(pago.getAlquiler());
+        byte[] contenido = comprobanteService.reciboPdf(idPago); // emite la boleta si todavía no existe
+        return ResponseEntity.ok()
+                .contentType(MediaType.APPLICATION_PDF)
+                .header(HttpHeaders.CONTENT_DISPOSITION,
+                        ContentDisposition.attachment().filename(comprobanteService.nombreArchivoRecibo(pago)).build().toString())
+                .header(HttpHeaders.CACHE_CONTROL, "no-store")
+                .body(contenido);
+    }
+
+    @PostMapping("/{idPago}/recibo/enviar")
+    public Map<String, Object> enviarRecibo(@PathVariable("idPago") Integer idPago) {
+        Pago pago = comprobanteService.buscarPago(idPago);
+        securityUtils.validarAccesoAlquiler(pago.getAlquiler());
+        boolean enviado = comprobanteService.enviarRecibo(idPago);
+        String correo = pago.getAlquiler().getCliente() != null ? pago.getAlquiler().getCliente().getEmail() : "";
+        return Map.of("enviado", enviado, "correo", correo == null ? "" : correo);
     }
 }

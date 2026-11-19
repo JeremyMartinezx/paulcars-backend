@@ -25,6 +25,13 @@ import jakarta.servlet.http.HttpServletResponse;
 @Component
 public class RateLimitingFilter extends OncePerRequestFilter {
 
+    /** Intentos de autenticación por minuto y petición de API por minuto (se pueden subir solo para cargas de prueba). */
+    @org.springframework.beans.factory.annotation.Value("${app.rate-limit.auth-por-minuto:10}")
+    private int limiteAuth;
+
+    @org.springframework.beans.factory.annotation.Value("${app.rate-limit.api-por-minuto:120}")
+    private int limiteApi;
+
     private final Map<String, Bucket> authBuckets = new ConcurrentHashMap<>();
     private final Map<String, Bucket> apiBuckets = new ConcurrentHashMap<>();
 
@@ -58,16 +65,16 @@ public class RateLimitingFilter extends OncePerRequestFilter {
 
     private Bucket createAuthBucket() {
         Bandwidth limit = Bandwidth.builder()
-                .capacity(10)
-                .refillGreedy(10, Duration.ofMinutes(1))
+                .capacity(limiteAuth)
+                .refillGreedy(limiteAuth, Duration.ofMinutes(1))
                 .build();
         return Bucket.builder().addLimit(limit).build();
     }
 
     private Bucket createApiBucket() {
         Bandwidth limit = Bandwidth.builder()
-                .capacity(120)
-                .refillGreedy(120, Duration.ofMinutes(1))
+                .capacity(limiteApi)
+                .refillGreedy(limiteApi, Duration.ofMinutes(1))
                 .build();
         return Bucket.builder().addLimit(limit).build();
     }
