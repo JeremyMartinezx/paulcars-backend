@@ -10,6 +10,14 @@ import com.example.alquiler_de_vehiculos.model.VehiculoModelo;
 
 public interface VehiculoModeloRepository extends JpaRepository<VehiculoModelo, Integer> {
 
+    boolean existsByMarca_IdMarca(Integer idMarca);
+
+    boolean existsByTipo_IdTipo(Integer idTipo);
+
+    boolean existsByCombustible_IdCombustible(Integer idCombustible);
+
+    boolean existsByMarca_IdMarcaAndNombreModeloIgnoreCase(Integer idMarca, String nombreModelo);
+
     @Override
     @EntityGraph(attributePaths = {"marca", "tipo", "combustible", "imagenes", "unidades", "unidades.estado"})
     List<VehiculoModelo> findAll();

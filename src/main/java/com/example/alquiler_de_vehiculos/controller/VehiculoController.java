@@ -30,9 +30,29 @@ import jakarta.validation.Valid;
 public class VehiculoController {
 
     private final VehiculoService vehiculoService;
+    private final com.example.alquiler_de_vehiculos.service.AlquilerService alquilerService;
 
-    public VehiculoController(VehiculoService vehiculoService) {
+    public VehiculoController(VehiculoService vehiculoService,
+                              com.example.alquiler_de_vehiculos.service.AlquilerService alquilerService) {
         this.vehiculoService = vehiculoService;
+        this.alquilerService = alquilerService;
+    }
+
+    /** Unidades libres de cada modelo por sede para el rango de fechas (sin fechas: hoy y mañana). */
+    @GetMapping("/disponibilidad-sedes")
+    public Map<Integer, Map<String, Integer>> disponibilidadSedes(
+            @RequestParam(required = false) String inicio, @RequestParam(required = false) String fin) {
+        java.time.LocalDate i = inicio != null && !inicio.isBlank() ? java.time.LocalDate.parse(inicio) : java.time.LocalDate.now();
+        java.time.LocalDate f = fin != null && !fin.isBlank() ? java.time.LocalDate.parse(fin) : i.plusDays(1);
+        Map<Integer, Map<String, Integer>> r = new java.util.LinkedHashMap<>();
+        for (VehiculoModelo m : vehiculoService.getAllVehiculos()) {
+            Map<String, Integer> porSede = new java.util.LinkedHashMap<>();
+            for (String sede : List.of("MIRAFLORES", "AEROPUERTO")) {
+                porSede.put(sede, alquilerService.contarStockDisponibleFechas(m.getIdModelo(), i, f, sede));
+            }
+            r.put(m.getIdModelo(), porSede);
+        }
+        return r;
     }
 
 
