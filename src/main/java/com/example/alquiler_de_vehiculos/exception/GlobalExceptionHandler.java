@@ -101,7 +101,7 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(NoResourceFoundException.class)
     public ResponseEntity<Map<String, Object>> handleNoResourceFound(NoResourceFoundException exception, WebRequest request) {
-        return buildResponse(HttpStatus.NOT_FOUND, "El recurso solicitado no fue encontrado: " + exception.getResourcePath(), request);
+        return buildResponse(HttpStatus.NOT_FOUND, "El recurso solicitado no fue encontrado", request);
     }
 
     @ExceptionHandler(Exception.class)

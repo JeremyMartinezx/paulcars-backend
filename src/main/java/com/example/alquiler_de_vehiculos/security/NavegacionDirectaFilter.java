@@ -25,7 +25,8 @@ public class NavegacionDirectaFilter extends OncePerRequestFilter {
     protected void doFilterInternal(HttpServletRequest req, HttpServletResponse res, FilterChain chain)
             throws ServletException, IOException {
         String ruta = req.getRequestURI();
-        if (ruta.startsWith("/api/")) {
+        boolean abiertaPorTodos = ruta.startsWith("/images/") || ruta.startsWith("/uploads/") || ruta.startsWith("/actuator/health");
+        if (!abiertaPorTodos) {
             String modo = req.getHeader("Sec-Fetch-Mode");
             String destino = req.getHeader("Sec-Fetch-Dest");
             boolean directa = "navigate".equalsIgnoreCase(modo)
