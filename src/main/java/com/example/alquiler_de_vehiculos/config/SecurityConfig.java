@@ -20,6 +20,7 @@ import org.springframework.security.web.header.writers.ReferrerPolicyHeaderWrite
 import org.springframework.web.cors.CorsConfigurationSource;
 
 import com.example.alquiler_de_vehiculos.security.JwtAuthenticationFilter;
+import com.example.alquiler_de_vehiculos.security.LimitePublicoFilter;
 import com.example.alquiler_de_vehiculos.security.RateLimitingFilter;
 
 /**
@@ -34,6 +35,10 @@ public class SecurityConfig {
 
     @Value("${app.swagger.permit-all:true}")
     private boolean swaggerPermitAll;
+
+    /** Altas públicas (registro y reserva sin sesión) permitidas por hora desde una misma conexión. */
+    @Value("${app.rate-limit.publico-por-hora:30}")
+    private int limitePublicoPorHora;
 
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http,
@@ -156,7 +161,8 @@ public class SecurityConfig {
 
             // 7. Filtros de seguridad en cadena
             .addFilterBefore(rateLimitingFilter, UsernamePasswordAuthenticationFilter.class)
-            .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class);
+            .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class)
+            .addFilterAfter(new LimitePublicoFilter(limitePublicoPorHora), JwtAuthenticationFilter.class);
 
         return http.build();
     }
