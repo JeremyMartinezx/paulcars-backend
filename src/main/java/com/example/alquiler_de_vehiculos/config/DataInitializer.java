@@ -22,6 +22,7 @@ import com.example.alquiler_de_vehiculos.model.Cliente;
 import com.example.alquiler_de_vehiculos.model.Combustible;
 import com.example.alquiler_de_vehiculos.model.EstadoAlquiler;
 import com.example.alquiler_de_vehiculos.model.EstadoVehiculo;
+import com.example.alquiler_de_vehiculos.model.HistorialEstadoAlquiler;
 import com.example.alquiler_de_vehiculos.model.ImagenVehiculo;
 import com.example.alquiler_de_vehiculos.model.Marca;
 import com.example.alquiler_de_vehiculos.model.MetodoPago;
@@ -178,20 +179,7 @@ public class DataInitializer implements CommandLineRunner {
     private record UnidadSeed(String placa, String vin, String motor, int km, String sede, String estadoInicial) {}
 
     private void initFlotaVehiculos() {
-        Set<String> modelosOficiales = Set.of(
-                "Corolla", "Versa", "3",
-                "Tucson", "Kicks", "ASX",
-                "Hilux", "L200", "Ranger",
-                "Rio", "Swift"
-        );
-        for (VehiculoModelo m : vehiculoModeloRepository.findAll()) {
-            if (!modelosOficiales.contains(m.getNombreModelo())) {
-                if (m.getUnidades() != null) {
-                    vehiculoUnidadRepository.deleteAll(m.getUnidades());
-                }
-                vehiculoModeloRepository.delete(m);
-            }
-        }
+        // Los modelos que registra el administrador se conservan: antes se borraban en cada arranque.
 
         asegurarModeloYUnidades(
                 "Toyota", "Corolla", 2022, "SEDAN", "GASOLINA",
@@ -407,27 +395,36 @@ public class DataInitializer implements CommandLineRunner {
         Rol rolAdmin = rolRepository.findByNombreRolIgnoreCase("ADMIN").orElseThrow();
         Rol rolEmpleado = rolRepository.findByNombreRolIgnoreCase("EMPLEADO").orElseThrow();
 
-        crearUsuarioSiNoExiste("admin@paulcars.com", "admin123", "admin@paulcars.com",
-                "Paul Cars Administrador", rolAdmin, null, true);
-
-        crearUsuarioSiNoExiste("asesor@paulcars.com", "asesor123", "asesor@paulcars.com",
-                "Carlos Mendoza - Asesor Principal", rolEmpleado, null, true);
-
-        crearUsuarioSiNoExiste("asesor1@paulcars.com", "asesor123", "asesor1@paulcars.com",
-                "Carlos Mendoza · Counter Miraflores", rolEmpleado, null, true);
-
-        crearUsuarioSiNoExiste("counter.aeropuerto@paulcars.com", "asesor123", "counter.aeropuerto@paulcars.com",
-                "Sofía Rodríguez · Counter Aeropuerto", rolEmpleado, null, true);
+        // Solo un administrador y un asesor
+        // Cada persona con sus nombres, apellidos y DNI por separado, y su correo personal; el cargo sale del rol
+        crearUsuarioSiNoExiste("alexander.ramos@paulcars.com", "admin123", "alexander.ramos@paulcars.com",
+                "Alexander", "Ramos Torres", "40123456", rolAdmin);
 
         crearUsuarioSiNoExiste("carlos.mendoza@paulcars.com", "asesor123", "carlos.mendoza@paulcars.com",
-                "Carlos Mendoza", rolEmpleado, null, true);
-
-        crearUsuarioSiNoExiste("sofia.rodriguez@paulcars.com", "asesor123", "sofia.rodriguez@paulcars.com",
-                "Sofía Rodríguez", rolEmpleado, null, true);
+                "Carlos", "Mendoza Rivas", "45678912", rolEmpleado);
     }
 
+    private static final String ASESOR_SEED = "Carlos Mendoza Rivas";
+    private static final List<String> CHECKLIST_SEED = List.of(
+            "Tarjeta de propiedad y SOAT vigentes",
+            "Llanta de repuesto y gata",
+            "Triángulo de seguridad y extintor",
+            "Interior limpio y sin daños",
+            "Carrocería revisada (rayones o abolladuras)",
+            "Luces y accesorios en funcionamiento");
+
+    /**
+     * Datos de demostración: 5 clientes y 12 alquileres (2 por estado: pendiente, reservado por pagar,
+     * reservado pagado, en ruta, finalizado y anulado), todos con su fecha y hora exacta de registro.
+     * Solo se siembran cuando la tabla de alquileres está vacía.
+     */
+    // Los datos de demostración actuales se cargan con el script scripts/cargar_datos_demostracion.sh;
+    // la semilla antigua solo se usa si se activa a propósito con app.sembrar-demo=true
+    @org.springframework.beans.factory.annotation.Value("${app.sembrar-demo:false}")
+    private boolean sembrarDemoAntigua;
+
     private void initClientesYOperaciones() {
-        if (alquilerRepository.count() > 0) {
+        if (!sembrarDemoAntigua || alquilerRepository.count() > 0) {
             return;
         }
 
@@ -458,174 +455,174 @@ public class DataInitializer implements CommandLineRunner {
                 "965432187", "rodrigo.castillo.g@gmail.com", "Q70829164",
                 "Malecón Cisneros 890, Miraflores, Lima", "ACTIVO", rolCliente);
 
-        asegurarCliente(
-                "Lucía Gabriela", "Fernández Castro", "DNI", "76123984",
-                "954321876", "lucia.fernandez.c@gmail.com", null,
-                "Av. Benavides 1890, Miraflores, Lima", "ACTIVO", rolCliente);
-
-        asegurarCliente(
-                "Mateo Nicolás", "Ramírez Delgado", null, null,
-                "943218765", "mateo.ramirez.d@gmail.com", null,
-                null, "ACTIVO", rolCliente);
-
         LocalDate hoy = LocalDate.now();
+        // Hora actual sin segundos: los registros de "hoy" se calculan hacia atrás para que nunca queden en el futuro
+        LocalDateTime ahora = LocalDateTime.now().withSecond(0).withNano(0);
 
         EstadoAlquiler stPendiente = crearEstadoAlquiler("PENDIENTE");
         EstadoAlquiler stReservado = crearEstadoAlquiler("RESERVADO");
         EstadoAlquiler stPagado = crearEstadoAlquiler("PAGADO");
         EstadoAlquiler stActivo = crearEstadoAlquiler("ACTIVO");
         EstadoAlquiler stFinalizado = crearEstadoAlquiler("FINALIZADO");
+        EstadoAlquiler stCancelado = crearEstadoAlquiler("CANCELADO");
+        EstadoAlquiler stRechazado = crearEstadoAlquiler("RECHAZADO");
 
         MetodoPago mpTarjeta = crearMetodoPago("TARJETA");
         MetodoPago mpYape = crearMetodoPago("YAPE");
         MetodoPago mpPlin = crearMetodoPago("PLIN");
         MetodoPago mpEfectivo = crearMetodoPago("EFECTIVO");
 
-        Alquiler fin1 = registrarContratoSeed(
-                c1, buscarModelo("Corolla"), buscarUnidad("ABC-121"),
-                hoy.minusDays(19), hoy.minusDays(18), hoy.minusDays(15), hoy.minusDays(15),
-                "10:00", "18:00", "MIRAFLORES", "MIRAFLORES",
-                true, false, false, stFinalizado,
-                BigDecimal.valueOf(3500.00), BigDecimal.valueOf(3500.00),
-                hoy.minusDays(15).atTime(17, 45),
-                "Recepción conforme en counter Miraflores. Kilometraje y nivel de combustible verificados sin observaciones.");
-        registrarPagoSeed(fin1, mpTarjeta, hoy.minusDays(18), "DIGITAL", "4532",
-                "VISA • Titular: CARLOS MENDOZA (Token Culqi: tok_culqi_901011)", "TRX-CARD-90101122", "CULQI_GATEWAY_PCI_DSS");
+        // ───────── PENDIENTE (2): solicitudes por atender ─────────
+        LocalDateTime reg = ahora.minusHours(2).minusMinutes(13);
+        Alquiler p1 = registrarContratoSeed(reg, c2, buscarModelo("Corolla"), null,
+                hoy.plusDays(1), hoy.plusDays(4), null, "09:00", "18:00", "MIRAFLORES", "MIRAFLORES",
+                true, false, false, stPendiente, null, null, null, null);
+        historial(p1, new String[] { "PENDIENTE" }, new LocalDateTime[] { reg });
 
-        Alquiler fin2 = registrarContratoSeed(
-                c2, buscarModelo("Swift"), buscarUnidad("SZK-701"),
-                hoy.minusDays(15), hoy.minusDays(14), hoy.minusDays(11), hoy.minusDays(11),
-                "09:00", "17:00", "AEROPUERTO", "AEROPUERTO",
-                false, false, true, stFinalizado,
-                BigDecimal.valueOf(2500.00), BigDecimal.valueOf(2500.00),
-                hoy.minusDays(11).atTime(16, 50),
-                "Devolución puntual en counter Aeropuerto Jorge Chávez. Sin incidencias en carrocería ni interior.");
-        registrarPagoSeed(fin2, mpPlin, hoy.minusDays(14), "DIGITAL", null,
-                "PLIN (BBVA - 991234567)", "TRX-PLIN-90102233", "PLIN_GATEWAY_INTEROPERABLE");
+        reg = ahora.minusHours(5).minusMinutes(41);
+        Alquiler p2 = registrarContratoSeed(reg, c4, buscarModelo("Swift"), null,
+                hoy.plusDays(2), hoy.plusDays(5), null, "10:00", "18:00", "AEROPUERTO", "AEROPUERTO",
+                false, false, true, stPendiente, null, null, null, null);
+        historial(p2, new String[] { "PENDIENTE" }, new LocalDateTime[] { reg });
 
-        Alquiler fin3 = registrarContratoSeed(
-                c1, buscarModelo("Tucson"), buscarUnidad("HYU-801"),
-                hoy.minusDays(11), hoy.minusDays(10), hoy.minusDays(6), hoy.minusDays(6),
-                "11:00", "18:00", "AEROPUERTO", "MIRAFLORES",
-                true, true, false, stFinalizado,
-                BigDecimal.valueOf(5000.00), BigDecimal.valueOf(5000.00),
-                hoy.minusDays(6).atTime(17, 30),
-                "Unidad devuelta en óptimas condiciones operativas. Garantía HOLD liberada al 100%.");
-        registrarPagoSeed(fin3, mpYape, hoy.minusDays(10), "DIGITAL", null,
-                "YAPE (987451230)", "TRX-YAPE-90103344", "YAPE_GATEWAY_CULQI");
+        // ───────── RESERVADO · POR PAGAR (2) ─────────
+        reg = ahora.minusDays(1).minusHours(3).minusMinutes(7);
+        Alquiler r1 = registrarContratoSeed(reg, c3, buscarModelo("Kicks"), buscarUnidad("NIS-901"),
+                hoy.plusDays(1), hoy.plusDays(3), null, "11:00", "18:00", "MIRAFLORES", "MIRAFLORES",
+                false, true, false, stReservado, null, null, null, null);
+        historial(r1, new String[] { "PENDIENTE", "RESERVADO" }, new LocalDateTime[] { reg, reg.plusMinutes(18) });
 
-        Alquiler fin4 = registrarContratoSeed(
-                c3, buscarModelo("Hilux"), buscarUnidad("HLX-302"),
-                hoy.minusDays(10), hoy.minusDays(9), hoy.minusDays(5), hoy.minusDays(5),
-                "08:30", "18:00", "AEROPUERTO", "AEROPUERTO",
-                true, false, false, stFinalizado,
-                BigDecimal.valueOf(7000.00), BigDecimal.valueOf(7000.00),
-                hoy.minusDays(5).atTime(18, 0),
-                "Inspección de retorno aprobada. Unidad trasladada a lavado estándar de patio.");
-        registrarPagoSeed(fin4, mpTarjeta, hoy.minusDays(9), "DIGITAL", "8841",
-                "MASTERCARD • Titular: DIEGO ALVAREZ (Token Culqi: tok_culqi_901044)", "TRX-CARD-90104455", "CULQI_GATEWAY_PCI_DSS");
+        reg = ahora.minusDays(1).minusHours(6).minusMinutes(52);
+        Alquiler r2 = registrarContratoSeed(reg, c5, buscarModelo("Rio"), buscarUnidad("JKL-011"),
+                hoy.plusDays(2), hoy.plusDays(4), null, "10:00", "18:00", "AEROPUERTO", "MIRAFLORES",
+                false, false, true, stReservado, null, null, null, null);
+        historial(r2, new String[] { "PENDIENTE", "RESERVADO" }, new LocalDateTime[] { reg, reg.plusMinutes(25) });
 
-        Alquiler fin5 = registrarContratoSeed(
-                c4, buscarModelo("Versa"), buscarUnidad("NSS-201"),
-                hoy.minusDays(7), hoy.minusDays(6), hoy.minusDays(4), hoy.minusDays(4),
-                "10:00", "18:00", "MIRAFLORES", "MIRAFLORES",
-                false, true, false, stFinalizado,
-                BigDecimal.valueOf(3500.00), BigDecimal.valueOf(3500.00),
-                hoy.minusDays(4).atTime(17, 15),
-                "Check-out completado sin cargos adicionales. Entrega de acta de conformidad al titular.");
-        registrarPagoSeed(fin5, mpEfectivo, hoy.minusDays(6), "COUNTER", null,
-                null, "POS-EFE-001055", "COUNTER_PRESENCIAL");
+        // ───────── RESERVADO · PAGADO (2) ─────────
+        reg = ahora.minusDays(2).minusHours(4).minusMinutes(36);
+        Alquiler g1 = registrarContratoSeed(reg, c1, buscarModelo("3"), buscarUnidad("MZD-401"),
+                hoy.plusDays(1), hoy.plusDays(4), null, "10:00", "18:00", "MIRAFLORES", "MIRAFLORES",
+                true, false, false, stPagado, null, null, null, null);
+        historial(g1, new String[] { "PENDIENTE", "RESERVADO", "PAGADO" },
+                new LocalDateTime[] { reg, reg.plusMinutes(12), reg.plusMinutes(31) });
+        registrarPagoSeed(g1, mpTarjeta, reg.plusMinutes(31), "DIGITAL", "4532",
+                "VISA • Titular: CARLOS MENDOZA", "TRX-CARD-90301144", "CULQI_GATEWAY_PCI_DSS");
 
-        Alquiler fin6 = registrarContratoSeed(
-                c5, buscarModelo("Rio"), buscarUnidad("JKL-012"),
-                hoy.minusDays(6), hoy.minusDays(5), hoy.minusDays(2), hoy.minusDays(2),
-                "09:00", "18:00", "MIRAFLORES", "AEROPUERTO",
-                false, false, false, stFinalizado,
-                BigDecimal.valueOf(2500.00), BigDecimal.valueOf(2500.00),
-                hoy.minusDays(2).atTime(17, 40),
-                "Vehículo recibido dentro del horario pactado y en perfecto estado mecánico y estético.");
-        registrarPagoSeed(fin6, mpYape, hoy.minusDays(5), "DIGITAL", null,
-                "YAPE (965432187)", "TRX-YAPE-90106677", "YAPE_GATEWAY_CULQI");
+        reg = ahora.minusDays(2).minusHours(1).minusMinutes(9);
+        Alquiler g2 = registrarContratoSeed(reg, c4, buscarModelo("Hilux"), buscarUnidad("HLX-301"),
+                hoy.plusDays(3), hoy.plusDays(6), null, "09:00", "18:00", "AEROPUERTO", "AEROPUERTO",
+                true, true, false, stPagado, null, null, null, null);
+        historial(g2, new String[] { "PENDIENTE", "RESERVADO", "PAGADO" },
+                new LocalDateTime[] { reg, reg.plusMinutes(10), reg.plusMinutes(22) });
+        registrarPagoSeed(g2, mpYape, reg.plusMinutes(22), "DIGITAL", null,
+                "YAPE (976543219)", "TRX-YAPE-90302255", "YAPE_GATEWAY_CULQI");
 
-        Alquiler act1 = registrarContratoSeed(
-                c1, buscarModelo("Ranger"), buscarUnidad("RNG-601"),
-                hoy.minusDays(3), hoy.minusDays(2), hoy, null,
-                "09:00", "18:00", "AEROPUERTO", "AEROPUERTO",
-                true, false, false, stActivo,
-                BigDecimal.valueOf(7000.00), null, null, null);
-        registrarPagoSeed(act1, mpTarjeta, hoy.minusDays(2), "DIGITAL", "4532",
-                "VISA • Titular: CARLOS MENDOZA (Token Culqi: tok_culqi_902011)", "TRX-CARD-90201188", "CULQI_GATEWAY_PCI_DSS");
+        // ───────── RESERVADO · PAGADO con recojo HOY (2): ya se puede entregar llaves ─────────
+        reg = ahora.minusDays(1).minusHours(2).minusMinutes(21);
+        Alquiler g3 = registrarContratoSeed(reg, c3, buscarModelo("Tucson"), buscarUnidad("HYU-801"),
+                hoy, hoy.plusDays(3), null, "10:00", "18:00", "MIRAFLORES", "MIRAFLORES",
+                true, false, false, stPagado, null, null, null, null);
+        historial(g3, new String[] { "PENDIENTE", "RESERVADO", "PAGADO" },
+                new LocalDateTime[] { reg, reg.plusMinutes(9), reg.plusMinutes(27) });
+        registrarPagoSeed(g3, mpEfectivo, reg.plusMinutes(27), "COUNTER", null,
+                null, "POS-EFE-003041", "COUNTER_PRESENCIAL");
 
-        Alquiler act2 = registrarContratoSeed(
-                c3, buscarModelo("ASX"), buscarUnidad("ASX-101"),
-                hoy.minusDays(2), hoy.minusDays(1), hoy.plusDays(2), null,
-                "10:00", "18:00", "MIRAFLORES", "MIRAFLORES",
-                true, false, true, stActivo,
-                BigDecimal.valueOf(5000.00), null, null, null);
-        registrarPagoSeed(act2, mpPlin, hoy.minusDays(1), "DIGITAL", null,
-                "PLIN (INTERBANK - 984567123)", "TRX-PLIN-90202299", "PLIN_GATEWAY_INTEROPERABLE");
+        reg = ahora.minusDays(1).minusHours(7).minusMinutes(48);
+        Alquiler g4 = registrarContratoSeed(reg, c1, buscarModelo("Versa"), buscarUnidad("NSS-201"),
+                hoy, hoy.plusDays(2), null, "11:00", "18:00", "AEROPUERTO", "AEROPUERTO",
+                false, true, false, stPagado, null, null, null, null);
+        historial(g4, new String[] { "PENDIENTE", "RESERVADO", "PAGADO" },
+                new LocalDateTime[] { reg, reg.plusMinutes(14), reg.plusMinutes(35) });
+        registrarPagoSeed(g4, mpYape, reg.plusMinutes(35), "DIGITAL", null,
+                "YAPE (987451230)", "TRX-YAPE-90303388", "YAPE_GATEWAY_CULQI");
 
-        Alquiler act3 = registrarContratoSeed(
-                c5, buscarModelo("L200"), buscarUnidad("L20-501"),
-                hoy.minusDays(3), hoy.minusDays(2), hoy.plusDays(1), null,
-                "08:30", "17:00", "MIRAFLORES", "AEROPUERTO",
-                false, true, false, stActivo,
-                BigDecimal.valueOf(7000.00), null, null, null);
-        registrarPagoSeed(act3, mpEfectivo, hoy.minusDays(2), "COUNTER", null,
+        // ───────── EN RUTA (2): llaves entregadas ─────────
+        reg = ahora.minusDays(4).minusHours(2).minusMinutes(18);
+        Alquiler a1 = registrarContratoSeed(reg, c1, buscarModelo("Ranger"), buscarUnidad("RNG-601"),
+                hoy.minusDays(1), hoy.plusDays(2), null, "09:00", "18:00", "AEROPUERTO", "AEROPUERTO",
+                true, false, false, stActivo, BigDecimal.valueOf(7000.00), null, null, null);
+        LocalDateTime entrega1 = hoy.minusDays(1).atTime(9, 12);
+        marcarEntrega(a1, entrega1, 8400, "LLENO");
+        historial(a1, new String[] { "PENDIENTE", "RESERVADO", "PAGADO", "ACTIVO" },
+                new LocalDateTime[] { reg, reg.plusMinutes(15), reg.plusMinutes(34), entrega1 });
+        registrarPagoSeed(a1, mpEfectivo, reg.plusMinutes(34), "COUNTER", null,
                 null, "POS-EFE-002033", "COUNTER_PRESENCIAL");
 
-        Alquiler pag1 = registrarContratoSeed(
-                c1, buscarModelo("3"), buscarUnidad("MZD-401"),
-                hoy.minusDays(1), hoy, hoy.plusDays(3), null,
-                "10:00", "18:00", "MIRAFLORES", "MIRAFLORES",
-                true, false, false, stPagado,
-                null, null, null, null);
-        registrarPagoSeed(pag1, mpTarjeta, hoy.minusDays(1), "DIGITAL", "4532",
-                "VISA • Titular: CARLOS MENDOZA (Token Culqi: tok_culqi_903011)", "TRX-CARD-90301144", "CULQI_GATEWAY_PCI_DSS");
+        reg = ahora.minusDays(5).minusHours(3).minusMinutes(44);
+        Alquiler a2 = registrarContratoSeed(reg, c3, buscarModelo("ASX"), buscarUnidad("ASX-101"),
+                hoy.minusDays(2), hoy.plusDays(1), null, "10:00", "18:00", "MIRAFLORES", "MIRAFLORES",
+                true, false, true, stActivo, BigDecimal.valueOf(5000.00), null, null, null);
+        // El cliente llegó 35 minutos después de la hora pactada
+        LocalDateTime entrega2 = hoy.minusDays(2).atTime(10, 35);
+        marcarEntrega(a2, entrega2, 11200, "3/4");
+        historial(a2, new String[] { "PENDIENTE", "RESERVADO", "PAGADO", "ACTIVO" },
+                new LocalDateTime[] { reg, reg.plusMinutes(20), reg.plusMinutes(41), entrega2 });
+        registrarPagoSeed(a2, mpPlin, reg.plusMinutes(41), "DIGITAL", null,
+                "PLIN (INTERBANK - 984567123)", "TRX-PLIN-90202299", "PLIN_GATEWAY_INTEROPERABLE");
 
-        Alquiler pag2 = registrarContratoSeed(
-                c5, buscarModelo("Hilux"), buscarUnidad("HLX-301"),
-                hoy, hoy.plusDays(2), hoy.plusDays(5), null,
-                "09:00", "18:00", "AEROPUERTO", "AEROPUERTO",
-                true, true, false, stPagado,
-                null, null, null, null);
-        registrarPagoSeed(pag2, mpYape, hoy, "DIGITAL", null,
-                "YAPE (965432187)", "TRX-YAPE-90302255", "YAPE_GATEWAY_CULQI");
+        // ───────── FINALIZADO (2): ya devueltos ─────────
+        reg = ahora.minusDays(11).minusHours(1).minusMinutes(26);
+        Alquiler f1 = registrarContratoSeed(reg, c2, buscarModelo("Swift"), buscarUnidad("SZK-701"),
+                hoy.minusDays(9), hoy.minusDays(6), hoy.minusDays(6), "09:00", "17:00", "AEROPUERTO", "AEROPUERTO",
+                false, false, true, stFinalizado, BigDecimal.valueOf(2500.00), BigDecimal.valueOf(2500.00),
+                hoy.minusDays(6).atTime(17, 20),
+                "Devolución con 20 minutos de retraso. Sin incidencias en carrocería ni interior.");
+        LocalDateTime entregaF1 = hoy.minusDays(9).atTime(9, 8);
+        marcarEntrega(f1, entregaF1, 6120, "LLENO");
+        historial(f1, new String[] { "PENDIENTE", "RESERVADO", "PAGADO", "ACTIVO", "FINALIZADO" },
+                new LocalDateTime[] { reg, reg.plusMinutes(14), reg.plusMinutes(29), entregaF1, hoy.minusDays(6).atTime(17, 20) });
+        registrarPagoSeed(f1, mpTarjeta, reg.plusMinutes(29), "DIGITAL", "4532",
+                "VISA • Titular: VALERIA TORRES", "TRX-CARD-90101122", "CULQI_GATEWAY_PCI_DSS");
 
-        registrarContratoSeed(
-                c1, buscarModelo("Kicks"), buscarUnidad("NIS-901"),
-                hoy.minusDays(1), hoy, hoy.plusDays(2), null,
-                "11:00", "18:00", "MIRAFLORES", "MIRAFLORES",
-                false, true, false, stReservado,
-                null, null, null, null);
+        reg = ahora.minusDays(8).minusHours(4).minusMinutes(3);
+        Alquiler f2 = registrarContratoSeed(reg, c5, buscarModelo("Rio"), buscarUnidad("JKL-012"),
+                hoy.minusDays(7), hoy.minusDays(4), hoy.minusDays(4), "09:00", "18:00", "MIRAFLORES", "AEROPUERTO",
+                false, false, false, stFinalizado, BigDecimal.valueOf(2500.00), BigDecimal.valueOf(2500.00),
+                hoy.minusDays(4).atTime(17, 40),
+                "Vehículo recibido antes del horario pactado y en perfecto estado mecánico y estético.");
+        LocalDateTime entregaF2 = hoy.minusDays(7).atTime(8, 58);
+        marcarEntrega(f2, entregaF2, 15230, "LLENO");
+        historial(f2, new String[] { "PENDIENTE", "RESERVADO", "PAGADO", "ACTIVO", "FINALIZADO" },
+                new LocalDateTime[] { reg, reg.plusMinutes(16), reg.plusMinutes(38), entregaF2, hoy.minusDays(4).atTime(17, 40) });
+        registrarPagoSeed(f2, mpYape, reg.plusMinutes(38), "DIGITAL", null,
+                "YAPE (965432187)", "TRX-YAPE-90106677", "YAPE_GATEWAY_CULQI");
 
-        registrarContratoSeed(
-                c4, buscarModelo("Rio"), buscarUnidad("JKL-011"),
-                hoy, hoy.plusDays(1), hoy.plusDays(4), null,
-                "10:00", "18:00", "AEROPUERTO", "MIRAFLORES",
-                false, false, true, stReservado,
-                null, null, null, null);
+        // ───────── ANULADO (2): una cancelada y una rechazada ─────────
+        reg = ahora.minusDays(3).minusHours(2).minusMinutes(30);
+        Alquiler x1 = registrarContratoSeed(reg, c4, buscarModelo("Corolla"), null,
+                hoy.plusDays(2), hoy.plusDays(5), null, "09:00", "18:00", "MIRAFLORES", "MIRAFLORES",
+                false, false, false, stCancelado, null, null, null, null);
+        historial(x1, new String[] { "PENDIENTE", "CANCELADO" }, new LocalDateTime[] { reg, reg.plusHours(5) });
 
-        registrarContratoSeed(
-                c1, buscarModelo("Corolla"), null,
-                hoy, hoy.plusDays(1), hoy.plusDays(4), null,
-                "09:00", "18:00", "MIRAFLORES", "MIRAFLORES",
-                true, false, false, stPendiente,
-                null, null, null, null);
+        reg = ahora.minusDays(2).minusHours(6).minusMinutes(12);
+        Alquiler x2 = registrarContratoSeed(reg, c2, buscarModelo("Versa"), null,
+                hoy.plusDays(1), hoy.plusDays(3), null, "12:00", "18:00", "MIRAFLORES", "AEROPUERTO",
+                false, false, false, stRechazado, null, null, null, null);
+        x2.setMotivoRechazo("DNI_NO_COINCIDE");
+        historial(x2, new String[] { "PENDIENTE", "RECHAZADO" }, new LocalDateTime[] { reg, reg.plusMinutes(47) });
+    }
 
-        registrarContratoSeed(
-                c3, buscarModelo("Tucson"), null,
-                hoy, hoy.plusDays(2), hoy.plusDays(6), null,
-                "10:00", "18:00", "AEROPUERTO", "AEROPUERTO",
-                true, true, false, stPendiente,
-                null, null, null, null);
+    // Reemplaza el historial automático por la línea de tiempo real del contrato de ejemplo
+    private void historial(Alquiler alq, String[] estados, LocalDateTime[] momentos) {
+        alq.getHistorialEstados().clear();
+        String anterior = null;
+        for (int i = 0; i < estados.length; i++) {
+            alq.getHistorialEstados().add(new HistorialEstadoAlquiler(alq, anterior, estados[i], momentos[i]));
+            anterior = estados[i];
+        }
+        alq.setFechaUltimoEstado(momentos[momentos.length - 1]);
+        alquilerRepository.save(alq);
+    }
 
-        registrarContratoSeed(
-                c4, buscarModelo("Swift"), null,
-                hoy, hoy.plusDays(1), hoy.plusDays(3), null,
-                "12:00", "18:00", "MIRAFLORES", "AEROPUERTO",
-                false, false, true, stPendiente,
-                null, null, null, null);
+    // Acta de entrega de llaves del contrato de ejemplo
+    private void marcarEntrega(Alquiler alq, LocalDateTime momento, int km, String combustible) {
+        alq.setFechaEntrega(momento);
+        alq.setKmEntrega(km);
+        alq.setCombustibleEntrega(combustible);
+        alq.setChecklistEntrega(String.join("|", CHECKLIST_SEED));
+        alq.setObservacionesEntrega("Sin observaciones.");
+        alq.setEntregadoPor(ASESOR_SEED);
+        alquilerRepository.save(alq);
     }
 
     private Cliente asegurarCliente(String nombres, String apellidos, String tipoDoc, String numDoc,
@@ -650,8 +647,8 @@ public class DataInitializer implements CommandLineRunner {
         return cliente;
     }
 
-    private Alquiler registrarContratoSeed(Cliente cliente, VehiculoModelo modelo, VehiculoUnidad unidad,
-                                           LocalDate fechaReserva, LocalDate fechaInicio, LocalDate fechaFinEstimada,
+    private Alquiler registrarContratoSeed(LocalDateTime registro, Cliente cliente, VehiculoModelo modelo, VehiculoUnidad unidad,
+                                           LocalDate fechaInicio, LocalDate fechaFinEstimada,
                                            LocalDate fechaFinReal, String horaRecojo, String horaDevolucion,
                                            String sedeRecojo, String sedeDevolucion,
                                            boolean seguro, boolean conductor, boolean silla,
@@ -668,7 +665,8 @@ public class DataInitializer implements CommandLineRunner {
         alq.setCliente(cliente);
         alq.setVehiculoModelo(modelo);
         alq.setVehiculoUnidad(unidad);
-        alq.setFechaReserva(fechaReserva);
+        alq.setFechaReserva(registro.toLocalDate());
+        alq.setFechaRegistro(registro);
         alq.setFechaInicio(fechaInicio);
         alq.setFechaFinEstimada(fechaFinEstimada);
         alq.setFechaFinReal(fechaFinReal);
@@ -682,6 +680,8 @@ public class DataInitializer implements CommandLineRunner {
         alq.setPrecioTotal(TarifarioPaulCars.redondear(total).doubleValue());
         alq.setServiciosExtras(TarifarioPaulCars.textoExtras(seguro, conductor, silla));
         alq.setEstado(estado);
+        // El historial real lo arma historial(): se descarta el registro automático de setEstado
+        alq.getHistorialEstados().clear();
         alq.setGarantiaRetenida(garantiaRetenida);
         alq.setGarantiaLiberada(garantiaLiberada);
         alq.setFechaCheckout(fechaCheckout);
@@ -689,7 +689,7 @@ public class DataInitializer implements CommandLineRunner {
         return alquilerRepository.save(alq);
     }
 
-    private void registrarPagoSeed(Alquiler alquiler, MetodoPago metodo, LocalDate fechaPago,
+    private void registrarPagoSeed(Alquiler alquiler, MetodoPago metodo, LocalDateTime cuando,
                                    String canal, String ultimosDigitos, String bancoOrigen,
                                    String numeroOperacion, String validadoPor) {
         BigDecimal monto = BigDecimal.valueOf(alquiler.getPrecioTotal());
@@ -697,10 +697,12 @@ public class DataInitializer implements CommandLineRunner {
         pago.setAlquiler(alquiler);
         pago.setMetodoPago(metodo);
         pago.setMontoTotal(TarifarioPaulCars.redondear(monto));
-        pago.setFechaPago(fechaPago);
+        pago.setFechaPago(cuando.toLocalDate());
+        pago.setFechaHoraPago(cuando);
         pago.setEstadoPago("Pagado");
         pago.setTipoPago("ALQUILER");
         pago.setCanal(canal);
+        pago.setRegistradoPor("COUNTER".equalsIgnoreCase(canal) ? ASESOR_SEED : "Pago en línea");
         if ("EFECTIVO".equalsIgnoreCase(metodo.getNombreMetodo())) {
             pago.setMontoRecibido(TarifarioPaulCars.redondear(monto));
             pago.setVuelto(BigDecimal.ZERO);
@@ -709,7 +711,7 @@ public class DataInitializer implements CommandLineRunner {
         pago.setBancoOrigen(bancoOrigen);
         pago.setNumeroOperacion(numeroOperacion);
         pago.setValidadoPor(validadoPor);
-        pago.setFechaValidacion(fechaPago.atTime(10, 15));
+        pago.setFechaValidacion(cuando);
         pagoRepository.save(pago);
     }
 
@@ -723,6 +725,26 @@ public class DataInitializer implements CommandLineRunner {
     private VehiculoUnidad buscarUnidad(String placa) {
         return vehiculoUnidadRepository.findByPlacaIgnoreCase(placa)
                 .orElseThrow(() -> new IllegalStateException("Unidad no encontrada en seed: " + placa));
+    }
+
+    /** Cuenta del personal (administrador o asesor): nombres, apellidos y DNI en campos propios. */
+    private void crearUsuarioSiNoExiste(String username, String rawPassword, String email,
+                                        String nombres, String apellidos, String dni, Rol rol) {
+        if (usuarioRepository.findByUsernameIgnoreCase(username).isEmpty()) {
+            Usuario u = new Usuario();
+            u.setUsername(username);
+            u.setPassword(passwordEncoder.encode(rawPassword));
+            u.setEmailRecuperacion(email);
+            u.setNombres(nombres);
+            u.setApellidos(apellidos);
+            u.setDni(dni);
+            u.setNombreCompleto(nombres + " " + apellidos);
+            u.setRol(rol);
+            u.setEstado(true);
+            u.setFechaCreacion(LocalDateTime.now());
+            usuarioRepository.save(u);
+            log.info("Usuario seed creado: [{}] con rol [{}]", username, rol.getNombreRol());
+        }
     }
 
     private void crearUsuarioSiNoExiste(String username, String rawPassword, String email,
