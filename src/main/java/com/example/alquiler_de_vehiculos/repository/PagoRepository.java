@@ -22,6 +22,10 @@ public interface PagoRepository extends JpaRepository<Pago, Integer> {
     @EntityGraph(attributePaths = {"alquiler", "metodoPago"})
     List<Pago> findByAlquiler_IdAlquiler(Integer idAlquiler);
 
+    boolean existsByNumeroOperacionIgnoreCase(String numeroOperacion);
+
+    boolean existsByNumeroAutorizacionIgnoreCase(String numeroAutorizacion);
+
     @EntityGraph(attributePaths = {"alquiler", "alquiler.cliente", "alquiler.vehiculoModelo", "alquiler.vehiculoUnidad", "metodoPago"})
     List<Pago> findByFechaPagoBetween(LocalDate desde, LocalDate hasta);
 }
