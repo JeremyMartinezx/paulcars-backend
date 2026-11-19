@@ -20,7 +20,7 @@ public class EmailService {
 
     public EmailService(
             @Autowired(required = false) JavaMailSender mailSender,
-            @Value("${spring.mail.username:}") String remitente,
+            @Value("${MAIL_FROM:${spring.mail.username:}}") String remitente,
             EmpresaProperties empresa,
             @Value("${app.frontend-url:http://localhost:4200}") String urlFrontend) {
         this.mailSender = mailSender;
