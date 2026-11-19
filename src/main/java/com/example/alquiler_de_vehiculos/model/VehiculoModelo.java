@@ -28,6 +28,7 @@ import lombok.NoArgsConstructor;
 import lombok.Setter;
 
 @Entity
+@jakarta.persistence.EntityListeners(com.example.alquiler_de_vehiculos.service.CambiosListener.class)
 @Table(name = "vehiculos_modelos")
 @Getter
 @Setter
@@ -51,6 +52,11 @@ public class VehiculoModelo {
 
     @Column(name = "anio")
     private Integer anio;
+
+    /** Color elegido al registrar el modelo; si está vacío se usa el color de catálogo por nombre de modelo. */
+    @Column(name = "color", length = 60)
+    @com.fasterxml.jackson.annotation.JsonIgnore
+    private String colorPropio;
 
     @ManyToOne
     @JoinColumn(name = "id_tipo", nullable = false)
@@ -86,6 +92,10 @@ public class VehiculoModelo {
     @Column(name = "sede", length = 100)
     private String sede;
 
+    /** Cada cuántos kilómetros cada unidad de este modelo debe pasar por mantenimiento (por defecto 10,000). */
+    @Column(name = "km_mantenimiento")
+    private Integer kmMantenimiento = 10000;
+
     @OneToMany(mappedBy = "vehiculoModelo", cascade = CascadeType.ALL, orphanRemoval = true, fetch = FetchType.EAGER)
     @OrderBy("orden ASC")
     private Set<ImagenVehiculo> imagenes = new LinkedHashSet<>();
@@ -120,8 +130,14 @@ public class VehiculoModelo {
                 .count();
     }
 
+    @com.fasterxml.jackson.annotation.JsonSetter("color")
+    public void setColor(String color) {
+        this.colorPropio = (color == null || color.isBlank()) ? null : color.trim();
+    }
+
     @JsonProperty("color")
     public String getColor() {
+        if (this.colorPropio != null && !this.colorPropio.isBlank()) return this.colorPropio;
         String mod = this.nombreModelo != null ? this.nombreModelo.trim().toLowerCase() : "";
         if (mod.contains("swift")) return "Amarillo Deportivo";
         if (mod.contains("mazda 3") || mod.equals("3")) return "Gris Polymetal";
