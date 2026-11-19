@@ -12,16 +12,19 @@ import java.util.stream.Collectors;
 
 import org.springframework.stereotype.Service;
 
+import com.example.alquiler_de_vehiculos.config.PoliticaCancelacionProperties;
 import com.example.alquiler_de_vehiculos.dto.NotificacionDTO;
 import com.example.alquiler_de_vehiculos.model.Alquiler;
 import com.example.alquiler_de_vehiculos.model.Cliente;
 import com.example.alquiler_de_vehiculos.model.NotificacionLeida;
+import com.example.alquiler_de_vehiculos.model.Pago;
 import com.example.alquiler_de_vehiculos.model.Usuario;
 import com.example.alquiler_de_vehiculos.model.VehiculoModelo;
 import com.example.alquiler_de_vehiculos.model.VehiculoUnidad;
 import com.example.alquiler_de_vehiculos.repository.AlquilerRepository;
 import com.example.alquiler_de_vehiculos.repository.ClienteRepository;
 import com.example.alquiler_de_vehiculos.repository.NotificacionLeidaRepository;
+import com.example.alquiler_de_vehiculos.repository.PagoRepository;
 import com.example.alquiler_de_vehiculos.repository.UsuarioRepository;
 import com.example.alquiler_de_vehiculos.repository.VehiculoModeloRepository;
 import com.example.alquiler_de_vehiculos.repository.VehiculoUnidadRepository;
@@ -37,13 +40,22 @@ public class NotificacionService {
     private final ClienteRepository clienteRepository;
     private final VehiculoModeloRepository vehiculoModeloRepository;
     private final VehiculoUnidadRepository vehiculoUnidadRepository;
+    private final PagoRepository pagoRepository;
+    private final PoliticaCancelacionProperties politica;
+    private final DanoService danoService;
 
     public NotificacionService(AlquilerRepository alquilerRepository,
                                NotificacionLeidaRepository leidaRepository,
                                UsuarioRepository usuarioRepository,
                                ClienteRepository clienteRepository,
                                VehiculoModeloRepository vehiculoModeloRepository,
-                               VehiculoUnidadRepository vehiculoUnidadRepository) {
+                               VehiculoUnidadRepository vehiculoUnidadRepository,
+                               PagoRepository pagoRepository,
+                               PoliticaCancelacionProperties politica,
+                               DanoService danoService) {
+        this.danoService = danoService;
+        this.pagoRepository = pagoRepository;
+        this.politica = politica;
         this.alquilerRepository = alquilerRepository;
         this.leidaRepository = leidaRepository;
         this.usuarioRepository = usuarioRepository;
@@ -140,6 +152,23 @@ public class NotificacionService {
                     alq.getIdAlquiler(),
                     leidas.contains(claveAuditoria)));
         }
+
+        // Daños recibidos que el administrador debe evaluar (la garantía sigue retenida)
+        todos.stream()
+                .filter(a -> DanoService.PENDIENTE.equals(a.getEstadoDanos()))
+                .limit(5)
+                .forEach(alq -> {
+                    String claveDanos = "ADM-DANOS-" + alq.getIdAlquiler();
+                    lista.add(new NotificacionDTO(
+                            claveDanos,
+                            "DANOS_PENDIENTES",
+                            "Daños por evaluar: ALQ-" + String.format("%06d", alq.getIdAlquiler()),
+                            vehiculo(alq) + " fue recibido con daños nuevos. La garantía de S/ " + alq.getGarantiaRetenida()
+                                    + " está retenida hasta que los evalúe.",
+                            alq.getFechaFinReal() != null ? alq.getFechaFinReal().toString() : "Reciente",
+                            alq.getIdAlquiler(),
+                            leidas.contains(claveDanos)));
+                });
 
         lista.sort(Comparator.comparing(NotificacionDTO::leida)
                 .thenComparing(NotificacionDTO::fecha, Comparator.nullsLast(Comparator.reverseOrder())));
@@ -256,6 +285,23 @@ public class NotificacionService {
         LocalTime ahora = LocalTime.now();
         List<NotificacionDTO> lista = new ArrayList<>();
 
+        // Bienvenida: la ven todos los clientes (registrados por el personal o por el portal) y queda como leída al abrirla
+        String primerNombre = cliente.getNombres() != null && !cliente.getNombres().isBlank()
+                ? cliente.getNombres().trim().split("\s+")[0] : "";
+        // Solo en la primera sesión de una cuenta nueva y mientras no haya hecho ningún alquiler
+        // (al iniciar sesión por segunda vez se registra CLI-BIENVENIDA-FIN y deja de mostrarse)
+        String claveBienvenida = "CLI-BIENVENIDA-" + cliente.getIdCliente();
+        if (misAlquileres.isEmpty() && !leidas.contains(AuthService.CLAVE_BIENVENIDA_FIN)) {
+            lista.add(new NotificacionDTO(
+                    claveBienvenida,
+                    "BIENVENIDA",
+                    "¡Bienvenido a Paul Car's" + (primerNombre.isEmpty() ? "" : ", " + primerNombre) + "!",
+                    "Ya puede ver nuestro catálogo y elegir su próximo vehículo. Cuando lo tenga, solicite su reserva y nuestro equipo la atenderá.",
+                    "Bienvenida",
+                    null,
+                    leidas.contains(claveBienvenida)));
+        }
+
         boolean faltaDni = cliente.getNumeroDocumento() == null || cliente.getNumeroDocumento().isBlank() || cliente.getNumeroDocumento().startsWith("PEND-");
         boolean faltaLicencia = cliente.getLicenciaConducir() == null || cliente.getLicenciaConducir().isBlank();
         boolean faltaDireccion = cliente.getDireccion() == null || cliente.getDireccion().isBlank();
@@ -266,7 +312,7 @@ public class NotificacionService {
                     clave,
                     "ACTUALIZA_PERFIL",
                     "Completa tus datos en Mi Perfil",
-                    "Registra tu documento de identidad (DNI), licencia de conducir y dirección en Mi Perfil para poder solicitar reservas sin demoras.",
+                    "Falta registrar en Mi Perfil: " + faltantes(faltaDni, faltaLicencia, faltaDireccion) + ". Complételo para solicitar reservas sin demoras.",
                     "Importante",
                     null,
                     leidas.contains(clave)));
@@ -292,15 +338,47 @@ public class NotificacionService {
                         leidas.contains(claveCreacion)));
             } else if ("RESERVADO".equals(estado)) {
                 String claveAprobada = "CLI-RESERVADO-" + a.getIdAlquiler();
+                // Reserva registrada por el asesor o el administrador: se avisa hasta cuándo puede pagarse
+                String limite = "";
+                if (a.getFechaInicio() != null) {
+                    LocalTime horaRec = LocalTime.of(10, 0);
+                    try {
+                        if (a.getHoraRecojo() != null && !a.getHoraRecojo().isBlank()) horaRec = LocalTime.parse(a.getHoraRecojo().trim());
+                    } catch (java.time.format.DateTimeParseException ignorada) {
+                        // hora con formato inesperado: se usa la hora por defecto
+                    }
+                    java.time.LocalDateTime aprobada = a.getFechaUltimoEstado() != null ? a.getFechaUltimoEstado() : java.time.LocalDateTime.now();
+                    java.time.LocalDateTime vence = politica.vencimientoPago(aprobada, a.getFechaInicio().atTime(horaRec));
+                    if (vence != null) {
+                        limite = " Tiene disponible para pagar hasta el " + vence.format(java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy 'a las' HH:mm"))
+                                + ". Si no se paga hasta esa hora, la reserva se cancelará.";
+                    }
+                }
                 lista.add(new NotificacionDTO(
                         claveAprobada,
                         "RESERVA_APROBADA",
-                        "¡Reserva Aprobada!: " + vehiculoNom,
-                        "Tu reserva fue aprobada para retiro el " + a.getFechaInicio() + " en sede " + sedeRec + ". Puedes completar tu pago con anticipación o abonar en counter.",
+                        "Reserva registrada: " + vehiculoNom,
+                        "Su reserva fue registrada por nuestro equipo para el recojo el " + (a.getFechaInicio() != null ? a.getFechaInicio().format(java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy")) : "-") + " en sede " + sedeRec + "." + limite,
                         a.getFechaInicio() != null ? a.getFechaInicio().toString() : fechaReg,
                         a.getIdAlquiler(),
                         leidas.contains(claveAprobada)));
             } else if ("PAGADO".equals(estado) || "CONFIRMADO".equals(estado)) {
+                // Aviso de recojo: el día anterior ("mañana") y de nuevo el mismo día ("hoy"), con la hora que el cliente eligió
+                if (a.getFechaInicio() != null && (a.getFechaInicio().equals(hoy) || a.getFechaInicio().equals(hoy.plusDays(1)))) {
+                    boolean esHoy = a.getFechaInicio().equals(hoy);
+                    String horaRecojo = a.getHoraRecojo() != null && !a.getHoraRecojo().isBlank() ? a.getHoraRecojo().trim() : "10:00";
+                    String sedeNombre = sedeRec.length() > 1 ? sedeRec.substring(0, 1).toUpperCase() + sedeRec.substring(1).toLowerCase() : sedeRec;
+                    String claveRecojo = "CLI-RECOJO-" + (esHoy ? "HOY-" : "MANANA-") + a.getIdAlquiler();
+                    lista.add(new NotificacionDTO(
+                            claveRecojo,
+                            "RECOJO_CLIENTE",
+                            (esHoy ? "Su vehículo está listo: " : "Mañana recoge su vehículo: ") + vehiculoNom,
+                            "Puede recogerlo " + (esHoy ? "hoy" : "mañana") + " a partir de las " + horaRecojo + " en la sede "
+                                    + sedeNombre + ". Lleve su DNI y su licencia de conducir.",
+                            a.getFechaInicio().toString(),
+                            a.getIdAlquiler(),
+                            leidas.contains(claveRecojo)));
+                }
                 String clavePago = "CLI-PAGO-" + a.getIdAlquiler();
                 lista.add(new NotificacionDTO(
                         clavePago,
@@ -342,24 +420,71 @@ public class NotificacionService {
                             claveRuta,
                             "ALQUILER_EN_CURSO",
                             "Vehículo en Ruta: " + vehiculoNom,
-                            "¡Llaves entregadas! Tu contrato está activo. Devolución programada para el " + a.getFechaFinEstimada() + " en sede " + sedeDev + ".",
+                            "¡Llaves entregadas! Su contrato está activo. Devolución programada para el "
+                                    + (a.getFechaFinEstimada() != null ? a.getFechaFinEstimada().format(java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy")) : "-")
+                                    + " a las " + (a.getHoraDevolucion() != null && !a.getHoraDevolucion().isBlank() ? a.getHoraDevolucion().trim() : "18:00")
+                                    + " en la sede " + (sedeDev.length() > 1 ? sedeDev.substring(0, 1).toUpperCase() + sedeDev.substring(1).toLowerCase() : sedeDev) + ".",
                             a.getFechaInicio() != null ? a.getFechaInicio().toString() : "En ruta",
                             a.getIdAlquiler(),
                             leidas.contains(claveRuta)));
                 }
-            } else if ("FINALIZADO".equals(estado)) {
+            } else if ("FINALIZADO".equals(estado) || "CERRADO_CON_DEUDA".equals(estado)) {
                 String claveFin = "CLI-FINALIZADO-" + a.getIdAlquiler();
-                lista.add(new NotificacionDTO(
-                        claveFin,
-                        "ALQUILER_FINALIZADO",
-                        "Alquiler Concluido: " + vehiculoNom,
-                        "Tu alquiler para " + vehiculoNom + " finalizó conforme en sede " + sedeDev + ". Depósito de garantía liberado al 100%.",
-                        a.getFechaFinReal() != null ? a.getFechaFinReal().toString() : (a.getFechaFinEstimada() != null ? a.getFechaFinEstimada().toString() : "Finalizado"),
-                        a.getIdAlquiler(),
-                        leidas.contains(claveFin)));
-            } else if ("RECHAZADO".equals(estado)) {
+                String fechaFin = a.getFechaFinReal() != null ? a.getFechaFinReal().toString() : (a.getFechaFinEstimada() != null ? a.getFechaFinEstimada().toString() : "Finalizado");
+                java.util.function.Function<java.math.BigDecimal, String> soles = v -> String.format(java.util.Locale.US, "S/ %,.2f", v == null ? java.math.BigDecimal.ZERO : v);
+                if (DanoService.PENDIENTE.equals(a.getEstadoDanos())) {
+                    String claveDanos = "CLI-DANOS-" + a.getIdAlquiler();
+                    lista.add(new NotificacionDTO(
+                            claveDanos,
+                            "DANOS_EN_EVALUACION",
+                            "Evaluando daños del vehículo: " + vehiculoNom,
+                            "Recibimos el vehículo con observaciones. Su garantía de " + soles.apply(a.getGarantiaRetenida())
+                                    + " permanece retenida mientras evaluamos los daños; le avisaremos el resultado. Puede ver el detalle en su reserva.",
+                            fechaFin,
+                            a.getIdAlquiler(),
+                            leidas.contains(claveDanos)));
+                } else if (DanoService.EVALUADO.equals(a.getEstadoDanos())) {
+                    java.math.BigDecimal pendiente = danoService.deudaPendiente(a);
+                    String detalle = "Evaluamos los daños de " + vehiculoNom + ": costo de reparación " + soles.apply(a.getCostoDanos());
+                    if (a.getMontoCubiertoSeguro() != null && a.getMontoCubiertoSeguro().signum() > 0) {
+                        detalle += ", seguro cubrió " + soles.apply(a.getMontoCubiertoSeguro());
+                    }
+                    detalle += ", a su cargo " + soles.apply(a.getCargoDanos()) + ". Garantía liberada: " + soles.apply(a.getGarantiaLiberada()) + ".";
+                    if (pendiente.signum() > 0) {
+                        detalle += " Queda un saldo de " + soles.apply(pendiente) + " por pagar en nuestro mostrador.";
+                    }
+                    lista.add(new NotificacionDTO(
+                            claveFin,
+                            pendiente.signum() > 0 ? "CERRADO_CON_DEUDA" : "ALQUILER_FINALIZADO",
+                            "Evaluación de daños: " + vehiculoNom,
+                            detalle,
+                            fechaFin,
+                            a.getIdAlquiler(),
+                            leidas.contains(claveFin)));
+                } else {
+                    boolean conDeuda = "CERRADO_CON_DEUDA".equals(estado);
+                    String texto = conDeuda
+                            ? "Su alquiler de " + vehiculoNom + " finalizó con cargos que superan la garantía. Saldo por pagar: "
+                                    + soles.apply(danoService.deudaPendiente(a)) + "."
+                            : "Tu alquiler para " + vehiculoNom + " finalizó conforme en sede " + sedeDev + ". "
+                                    + (a.getGarantiaLiberada() != null && a.getGarantiaRetenida() != null
+                                            && a.getGarantiaLiberada().compareTo(a.getGarantiaRetenida()) < 0
+                                            ? "Se liberó " + soles.apply(a.getGarantiaLiberada()) + " de su garantía (se descontaron cargos del cierre)."
+                                            : "Depósito de garantía liberado al 100%.");
+                    lista.add(new NotificacionDTO(
+                            claveFin,
+                            conDeuda ? "CERRADO_CON_DEUDA" : "ALQUILER_FINALIZADO",
+                            "Alquiler Concluido: " + vehiculoNom,
+                            texto,
+                            fechaFin,
+                            a.getIdAlquiler(),
+                            leidas.contains(claveFin)));
+                }
+            } else if ("CANCELADO".equals(estado)) {
+                agregarAvisosDeCancelacion(lista, a, vehiculoNom, leidas);
+            } else if ("RECHAZADO".equals(estado) || "RECHAZADO_DOCUMENTACION".equals(estado)) {
                 String claveRechazo = "CLI-RECHAZADO-" + a.getIdAlquiler();
-                String mot = a.getMotivoRechazo() != null ? a.getMotivoRechazo() : "Validación de counter";
+                String mot = a.getMotivoRechazo() != null ? AlquilerService.motivoRechazoParaCliente(a.getMotivoRechazo()) : "Validación de counter";
                 lista.add(new NotificacionDTO(
                         claveRechazo,
                         "SOLICITUD_RECHAZADA",
@@ -371,10 +496,94 @@ public class NotificacionService {
             }
         }
 
-        lista.sort(Comparator.comparing(NotificacionDTO::leida)
-                .thenComparing(NotificacionService::prioridadNotificacion)
-                .thenComparing(NotificacionDTO::fecha, Comparator.nullsLast(Comparator.reverseOrder())));
-        return lista;
+        // Orden cronológico (lo más reciente arriba), sin separar leídas de no leídas:
+        // en un mismo día, el aviso de recojo va antes que el pago confirmado, y este antes que la reserva
+        lista.sort(Comparator.comparing(NotificacionDTO::fecha, Comparator.nullsLast(Comparator.reverseOrder()))
+                .thenComparingInt(NotificacionService::ordenDelCicloCliente));
+        List<NotificacionDTO> visibles = limitar(lista, 8);
+        // La bienvenida fue la primera que recibió el cliente: queda siempre al final, debajo de las más nuevas
+        List<NotificacionDTO> ordenada = new ArrayList<>();
+        visibles.stream().filter(x -> !"BIENVENIDA".equals(x.tipo())).forEach(ordenada::add);
+        visibles.stream().filter(x -> "BIENVENIDA".equals(x.tipo())).forEach(ordenada::add);
+        return ordenada;
+    }
+
+    /** Si hay muchas, se conservan todas las no leídas y las leídas más recientes; las leídas más antiguas se ocultan. */
+    private static List<NotificacionDTO> limitar(List<NotificacionDTO> lista, int maximo) {
+        if (lista.size() <= maximo) return lista;
+        boolean[] conservar = new boolean[lista.size()];
+        int total = 0;
+        for (int k = 0; k < lista.size(); k++) {
+            if (!lista.get(k).leida() || "BIENVENIDA".equals(lista.get(k).tipo())) {
+                conservar[k] = true;
+                total++;
+            }
+        }
+        for (int k = lista.size() - 1; k >= 0 && total < maximo; k--) {
+            if (!conservar[k]) {
+                conservar[k] = true;
+                total++;
+            }
+        }
+        List<NotificacionDTO> resultado = new ArrayList<>();
+        for (int k = 0; k < lista.size(); k++) {
+            if (conservar[k]) resultado.add(lista.get(k));
+        }
+        return resultado;
+    }
+
+    // Reserva cancelada: avisa del estado de la devolución (en proceso o realizada) o de por qué no hay devolución
+    private void agregarAvisosDeCancelacion(List<NotificacionDTO> lista, Alquiler a, String vehiculoNom, Set<String> leidas) {
+        List<Pago> todos = pagoRepository.findByAlquiler_IdAlquiler(a.getIdAlquiler());
+        List<Pago> devoluciones = todos.stream().filter(p -> "REEMBOLSO".equalsIgnoreCase(p.getTipoPago())).toList();
+        boolean tuvoPago = todos.stream().anyMatch(p -> p.getTipoPago() == null || "ALQUILER".equalsIgnoreCase(p.getTipoPago()));
+        String fecha = a.getFechaCancelacion() != null ? a.getFechaCancelacion().toLocalDate().toString() : "Reciente";
+        Integer id = a.getIdAlquiler();
+
+        if (devoluciones.isEmpty()) {
+            String clave = "CLI-CANCELADA-" + id;
+            String detalle = "NO_PAGO_EN_PLAZO".equals(a.getMotivoCancelacion())
+                    ? "Se canceló porque no se pagó dentro del plazo."
+                    : tuvoPago ? "Según la política de cancelación, esta reserva no tiene devolución de dinero."
+                    : "";
+            lista.add(new NotificacionDTO(clave, "RESERVA_CANCELADA", "Reserva cancelada: " + vehiculoNom,
+                    ("Tu reserva ALQ-" + String.format("%06d", id) + " fue cancelada. " + detalle).trim(), fecha, id, leidas.contains(clave)));
+            return;
+        }
+
+        java.math.BigDecimal monto = devoluciones.stream().map(p -> p.getMontoTotal().abs())
+                .reduce(java.math.BigDecimal.ZERO, java.math.BigDecimal::add);
+        String metodo = devoluciones.stream()
+                .map(p -> p.getMetodoPago() != null ? p.getMetodoPago().getNombreMetodo() : "")
+                .filter(x -> x != null && !x.isBlank()).distinct().collect(Collectors.joining(" + "));
+        String montoTxt = "S/ " + String.format(java.util.Locale.US, "%,.2f", monto);
+        boolean efectivo = metodo.toUpperCase().contains("EFECTIVO");
+        java.time.LocalDate limite = politica.fechaEstimadaDevolucion(
+                a.getFechaCancelacion() != null ? a.getFechaCancelacion().toLocalDate() : java.time.LocalDate.now(), metodo);
+        boolean enTramite = !efectivo && !java.time.LocalDate.now().isAfter(limite);
+        String clave = "CLI-DEVOL-" + (enTramite ? "TRAMITE-" : "REALIZADA-") + id;
+        String texto = efectivo
+                ? "Le entregamos " + montoTxt + " en efectivo."
+                : enTramite
+                    ? "Iniciamos la devolución de " + montoTxt + " por " + metodo.toLowerCase() + ". Llegará a su cuenta, a más tardar, el "
+                        + limite.format(java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy")) + "."
+                    : "Devolvimos " + montoTxt + " por " + metodo.toLowerCase() + ".";
+        lista.add(new NotificacionDTO(clave, enTramite ? "REEMBOLSO_EN_TRAMITE" : "REEMBOLSO_REALIZADO",
+                (enTramite ? "Devolución en trámite: " : "Devolución realizada: ") + vehiculoNom,
+                texto + " Puede ver el detalle y su nota de crédito en Mis reservas.",
+                fecha, id, leidas.contains(clave)));
+    }
+
+    /** Menor número = ocurrió después dentro de la vida de una reserva del cliente. */
+    private static int ordenDelCicloCliente(NotificacionDTO n) {
+        if (n == null || n.tipo() == null) return 9;
+        return switch (n.tipo()) {
+            case "RECOJO_CLIENTE" -> 0;
+            case "PAGO_CONFIRMADO" -> 1;
+            case "RESERVA_APROBADA" -> 2;
+            case "SOLICITUD_PENDIENTE" -> 3;
+            default -> 5;
+        };
     }
 
     private static int prioridadNotificacion(NotificacionDTO n) {
@@ -427,5 +636,15 @@ public class NotificacionService {
             return (marca + " " + mod).trim();
         }
         return "un vehículo";
+    }
+
+    /** "DNI, licencia de conducir y dirección": solo lo que realmente falta. */
+    private static String faltantes(boolean dni, boolean licencia, boolean direccion) {
+        List<String> f = new ArrayList<>();
+        if (dni) f.add("el DNI");
+        if (licencia) f.add("la licencia de conducir");
+        if (direccion) f.add("la dirección");
+        if (f.size() <= 1) return String.join("", f);
+        return String.join(", ", f.subList(0, f.size() - 1)) + " y " + f.get(f.size() - 1);
     }
 }
