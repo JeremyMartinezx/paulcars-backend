@@ -47,6 +47,16 @@ public final class TarifarioPaulCars {
         };
     }
 
+    /** Lo único que paga el cliente de un daño cubierto por el Seguro Todo Riesgo (deducible mínimo, según la categoría). */
+    public static BigDecimal deducibleSeguro(VehiculoModelo vehiculo) {
+        return switch (categoria(vehiculo)) {
+            case "HATCHBACK" -> new BigDecimal("250.00");
+            case "SUV" -> new BigDecimal("500.00");
+            case "PICKUP" -> new BigDecimal("700.00");
+            default -> new BigDecimal("350.00");
+        };
+    }
+
     public static BigDecimal garantiaHoldPorCategoria(VehiculoModelo vehiculo) {
         return deduciblePorCategoria(vehiculo);
     }
