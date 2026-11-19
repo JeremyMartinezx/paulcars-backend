@@ -45,6 +45,8 @@ public class VehiculoController {
     private Object visible(VehiculoModelo m) {
         if (esPersonal()) return m;
         Map<String, Object> mapa = mapper.convertValue(m, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
+        mapa.remove("kmMantenimiento");
+        mapa.remove("activo");
         Object u = mapa.get("unidades");
         if (u instanceof List<?> lista) {
             List<Map<String, Object>> limpias = new java.util.ArrayList<>();
