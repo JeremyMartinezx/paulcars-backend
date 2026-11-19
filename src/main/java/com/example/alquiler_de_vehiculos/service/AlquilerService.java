@@ -13,6 +13,7 @@ import java.util.List;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
@@ -22,6 +23,7 @@ import org.springframework.web.server.ResponseStatusException;
 import com.example.alquiler_de_vehiculos.dto.AlquilerCounterRequest;
 import com.example.alquiler_de_vehiculos.dto.CheckoutRequest;
 import com.example.alquiler_de_vehiculos.dto.DisponibilidadHorariosDTO;
+import com.example.alquiler_de_vehiculos.dto.EntregaRequest;
 import com.example.alquiler_de_vehiculos.dto.LiquidacionResponse;
 import com.example.alquiler_de_vehiculos.dto.RechazoReservaRequest;
 import com.example.alquiler_de_vehiculos.model.Alquiler;
@@ -40,6 +42,7 @@ import com.example.alquiler_de_vehiculos.repository.UsuarioRepository;
 import com.example.alquiler_de_vehiculos.repository.VehiculoModeloRepository;
 import com.example.alquiler_de_vehiculos.repository.VehiculoUnidadRepository;
 import com.example.alquiler_de_vehiculos.security.SecurityUtils;
+import com.example.alquiler_de_vehiculos.util.ComprobanteEvents;
 import com.example.alquiler_de_vehiculos.util.TarifarioPaulCars;
 
 import jakarta.transaction.Transactional;
@@ -57,8 +60,13 @@ public class AlquilerService {
     private final EstadoAlquilerRepository estadoAlquilerRepository;
     private final UsuarioRepository usuarioRepository;
     private final PagoRepository pagoRepository;
+    private final com.example.alquiler_de_vehiculos.repository.HistorialEstadoAlquilerRepository historialRepository;
     private final EmailService emailService;
+    private final com.example.alquiler_de_vehiculos.config.PoliticaCancelacionProperties politica;
     private final SecurityUtils securityUtils;
+    private final ApplicationEventPublisher eventPublisher;
+    private final CancelacionService cancelacionService;
+    private final DanoService danoService;
 
     public AlquilerService(AlquilerRepository alquilerRepository,
                            ClienteRepository clienteRepository,
@@ -68,8 +76,14 @@ public class AlquilerService {
                            EstadoAlquilerRepository estadoAlquilerRepository,
                            UsuarioRepository usuarioRepository,
                            PagoRepository pagoRepository,
+                           com.example.alquiler_de_vehiculos.repository.HistorialEstadoAlquilerRepository historialRepository,
                            EmailService emailService,
-                           SecurityUtils securityUtils) {
+                           com.example.alquiler_de_vehiculos.config.PoliticaCancelacionProperties politica,
+                           SecurityUtils securityUtils,
+                           ApplicationEventPublisher eventPublisher,
+                           @org.springframework.context.annotation.Lazy CancelacionService cancelacionService,
+                           DanoService danoService) {
+        this.danoService = danoService;
         this.alquilerRepository = alquilerRepository;
         this.clienteRepository = clienteRepository;
         this.vehiculoModeloRepository = vehiculoModeloRepository;
@@ -78,8 +92,12 @@ public class AlquilerService {
         this.estadoAlquilerRepository = estadoAlquilerRepository;
         this.usuarioRepository = usuarioRepository;
         this.pagoRepository = pagoRepository;
+        this.historialRepository = historialRepository;
         this.emailService = emailService;
+        this.politica = politica;
         this.securityUtils = securityUtils;
+        this.eventPublisher = eventPublisher;
+        this.cancelacionService = cancelacionService;
     }
 
 
@@ -108,9 +126,10 @@ public class AlquilerService {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "El modelo de vehículo no se encuentra activo");
         }
 
-        int stockDisponible = contarStockDisponibleFechas(idModelo, fechaInicio, fechaFin);
+        int stockDisponible = contarStockDisponibleFechas(idModelo, fechaInicio, fechaFin, sedeRecojo);
         if (stockDisponible <= 0) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "Sin unidades disponibles de este modelo para las fechas seleccionadas");
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Sin disponibilidad en la sede " + nombreSede(sedeRecojo)
+                    + " para las fechas seleccionadas. Prueba con otra sede u otras fechas.");
         }
 
         boolean seguro = TarifarioPaulCars.tieneSeguro(serviciosExtras);
@@ -133,14 +152,15 @@ public class AlquilerService {
         Cliente cliente = clienteRepository.findById(req.idCliente())
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Cliente no encontrado"));
         validarClienteHabilitado(cliente);
-        validarDocumentosCliente(cliente);
+        validarDocumentosCliente(cliente, false);
 
         VehiculoModelo modelo = vehiculoModeloRepository.findById(req.idVehiculo())
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Modelo de vehículo no encontrado"));
 
         VehiculoUnidad unidad = buscarUnidadLibreParaFechas(modelo.getIdModelo(), req.fechaInicio(), req.fechaFin(), req.sedeRecojo());
         if (unidad == null) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "No hay unidades físicas disponibles de este modelo para las fechas seleccionadas");
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Sin disponibilidad en la sede " + nombreSede(req.sedeRecojo())
+                    + " para las fechas seleccionadas. Prueba con otra sede u otras fechas.");
         }
 
         Alquiler alquiler = armarAlquiler(cliente, modelo, req.fechaInicio(), req.fechaFin(),
@@ -174,14 +194,16 @@ public class AlquilerService {
 
         if (unidadAsignada == null) {
             throw new ResponseStatusException(HttpStatus.CONFLICT,
-                    "No hay unidades físicas disponibles de este modelo (" + modelo.getNombreModelo() + ") para el rango de fechas seleccionado.");
+                    "Sin disponibilidad en la sede " + nombreSede(alquiler.getSedeRecojo()) + " para " + modelo.getNombreModelo()
+                            + " en el rango de fechas seleccionado.");
         }
 
         alquiler.setVehiculoUnidad(unidadAsignada);
         alquiler.setEstado(estadoAlquiler("RESERVADO"));
         Alquiler aprobado = alquilerRepository.save(alquiler);
+        avisarAprobacion(aprobado);
 
-        int stockRestante = contarStockDisponibleFechas(modelo.getIdModelo(), alquiler.getFechaInicio(), alquiler.getFechaFinEstimada());
+        int stockRestante = contarStockDisponibleFechas(modelo.getIdModelo(), alquiler.getFechaInicio(), alquiler.getFechaFinEstimada(), alquiler.getSedeRecojo());
 
         if (stockRestante <= 0) {
             log.info("Stock agotado para modelo {} entre {} y {}. Cancelando solicitudes pendientes solapadas...",
@@ -199,17 +221,13 @@ public class AlquilerService {
                 pend.setFechaFinReal(LocalDate.now());
                 alquilerRepository.save(pend);
 
-                try {
-                    emailService.enviarRechazoReserva(
-                            pend.getCliente().getEmail(),
-                            pend.getCliente().getNombres(),
-                            modelo.getMarca().getNombreMarca() + " " + modelo.getNombreModelo(),
-                            "Agotado por Alta Demanda",
-                            pend.getObservacionRechazo()
-                    );
-                } catch (Exception ex) {
-                    log.warn("No se pudo notificar por correo al cliente {}: {}", pend.getCliente().getEmail(), ex.getMessage());
-                }
+                // El correo sale en segundo plano: la aprobación no espera al servidor de correo
+                final String correo = pend.getCliente().getEmail();
+                final String nombre = pend.getCliente().getNombres();
+                final String vehiculoTxt = modelo.getMarca().getNombreMarca() + " " + modelo.getNombreModelo();
+                final String observacion = pend.getObservacionRechazo();
+                enSegundoPlano("rechazo por falta de stock a " + correo,
+                        () -> emailService.enviarRechazoReserva(correo, nombre, vehiculoTxt, "Agotado por Alta Demanda", observacion));
             }
         }
 
@@ -231,6 +249,17 @@ public class AlquilerService {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Causal de rechazo no válida: " + req.motivo());
         }
 
+        if ("HISTORIAL_NEGATIVO".equals(motivo)) {
+            // Solo tiene sentido si el cliente ya tuvo alquileres: una cuenta nueva no puede tener obligaciones pendientes
+            boolean tuvoAlquileres = alquiler.getCliente() != null && alquilerRepository.findByCliente_IdCliente(alquiler.getCliente().getIdCliente()).stream()
+                    .filter(o -> !o.getIdAlquiler().equals(alquiler.getIdAlquiler()))
+                    .anyMatch(o -> o.getEstado() != null && java.util.Set.of("RESERVADO", "PAGADO", "CONFIRMADO", "ACTIVO", "FINALIZADO",
+                            "CERRADO_CON_DEUDA", "CANCELADO").contains(o.getEstado().getNombreEstado().toUpperCase()));
+            if (!tuvoAlquileres) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "Este cliente no tiene alquileres anteriores, por lo que no puede tener obligaciones pendientes. Elija otra causal.");
+            }
+        }
         alquiler.setMotivoRechazo(motivo);
         alquiler.setObservacionRechazo(req.observaciones() != null ? req.observaciones().trim() : null);
         alquiler.setFechaFinReal(LocalDate.now());
@@ -245,20 +274,95 @@ public class AlquilerService {
 
         Alquiler guardado = alquilerRepository.save(alquiler);
 
+        // El correo sale en segundo plano: el rechazo se ve al instante
         Cliente c = alquiler.getCliente();
-        emailService.enviarRechazoReserva(
-                c.getEmail(),
-                c.getNombres(),
-                nombreVehiculo(alquiler.getVehiculoModelo()),
-                motivoLegible(motivo),
-                alquiler.getObservacionRechazo());
+        final String correo = c.getEmail();
+        final String nombre = c.getNombres();
+        final String vehiculoTxt = nombreVehiculo(alquiler.getVehiculoModelo());
+        final String motivoTxt = motivoRechazoParaCliente(motivo);
+        final String observacion = alquiler.getObservacionRechazo();
+        enSegundoPlano("rechazo a " + correo, () -> emailService.enviarRechazoReserva(correo, nombre, vehiculoTxt, motivoTxt, observacion));
 
         return guardado;
     }
 
 
+    private static final java.util.Set<String> NIVELES_COMBUSTIBLE = java.util.Set.of("LLENO", "3/4", "1/2", "1/4");
+
+    private String nivelCombustible(String valor) {
+        String n = valor == null ? "" : valor.trim().toUpperCase();
+        if (!NIVELES_COMBUSTIBLE.contains(n)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Seleccione el nivel de combustible del vehículo (Lleno, 3/4, 1/2 o 1/4).");
+        }
+        return n;
+    }
+
+    private LocalDateTime horaPactadaDeRecojo(Alquiler alquiler) {
+        java.time.LocalTime hora = java.time.LocalTime.of(10, 0);
+        try {
+            if (alquiler.getHoraRecojo() != null && !alquiler.getHoraRecojo().isBlank()) {
+                hora = java.time.LocalTime.parse(alquiler.getHoraRecojo().trim());
+            }
+        } catch (java.time.format.DateTimeParseException ignorada) {
+            // se usa la hora por defecto
+        }
+        return alquiler.getFechaInicio().atTime(hora);
+    }
+
+    /**
+     * Ventana de entrega: desde N minutos antes de la hora pactada hasta que termine la espera al cliente.
+     * Fuera de ella no se puede entregar.
+     */
+    private void exigirVentanaDeEntrega(Alquiler alquiler, LocalDateTime ahora) {
+        if (alquiler.getFechaInicio() == null) return;
+        LocalDateTime pactada = horaPactadaDeRecojo(alquiler);
+        LocalDateTime desde = pactada.minusMinutes(politica.getEntregaAnticipadaMinutos());
+        LocalDateTime hasta = pactada.plusMinutes(politica.getEsperaClienteMinutos());
+        var formato = java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy 'a las' HH:mm");
+        if (ahora.isBefore(desde)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Todavía no se puede entregar: la entrega se habilita el " + desde.format(formato) + " ("
+                            + politica.getEntregaAnticipadaMinutos() + " minutos antes de la hora pactada).");
+        }
+        if (ahora.isAfter(hasta)) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Pasó el tiempo de espera (" + politica.getEsperaClienteMinutos() + " minutos desde la hora pactada): "
+                            + "el cliente no se presentó y la reserva se cancela sin devolución.");
+        }
+    }
+
+    /**
+     * Qué se registra como hora de entrega y de devolución:
+     *  - Entrega anticipada (hasta N min antes): sale a la hora real y la devolución se adelanta los mismos minutos,
+     *    para que el alquiler dure lo contratado.
+     *  - A la hora pactada o con retraso (dentro de la espera): se registra la hora real y la devolución no se mueve,
+     *    porque el vehículo esperó al cliente.
+     */
+    private void registrarHorasDeEntrega(Alquiler alquiler, LocalDateTime ahora) {
+        LocalDateTime pactada = horaPactadaDeRecojo(alquiler);
+        // La hora real es siempre la del momento en que se entregan las llaves
+        alquiler.setFechaEntrega(ahora);
+        if (!ahora.isBefore(pactada)) {
+            return; // llegó a la hora o con retraso: la devolución no se mueve
+        }
+        long adelanto = java.time.Duration.between(ahora, pactada).toMinutes();
+        if (adelanto > 0 && alquiler.getFechaFinEstimada() != null
+                && alquiler.getHoraDevolucion() != null && !alquiler.getHoraDevolucion().isBlank()) {
+            try {
+                LocalDateTime devolucion = alquiler.getFechaFinEstimada()
+                        .atTime(java.time.LocalTime.parse(alquiler.getHoraDevolucion().trim()))
+                        .minusMinutes(adelanto);
+                alquiler.setFechaFinEstimada(devolucion.toLocalDate());
+                alquiler.setHoraDevolucion(devolucion.toLocalTime().format(java.time.format.DateTimeFormatter.ofPattern("HH:mm")));
+            } catch (java.time.format.DateTimeParseException ignorada) {
+                // hora de devolución con formato inesperado: no se ajusta
+            }
+        }
+    }
+
     @Transactional
-    public Alquiler entregarLlaves(Integer idAlquiler) {
+    public Alquiler entregarLlaves(Integer idAlquiler, EntregaRequest req) {
         Alquiler alquiler = buscar(idAlquiler);
         String estado = nombreEstado(alquiler);
         if (!"PAGADO".equalsIgnoreCase(estado) && !"RESERVADO".equalsIgnoreCase(estado) && !"CONFIRMADO".equalsIgnoreCase(estado)) {
@@ -270,26 +374,161 @@ public class AlquilerService {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "No se ha asignado una unidad física a esta reserva");
         }
 
-        LocalDate hoy = LocalDate.now();
-        if (alquiler.getFechaInicio() != null && alquiler.getFechaInicio().isAfter(hoy)) {
-            String horaMsg = (alquiler.getHoraRecojo() != null && !alquiler.getHoraRecojo().isBlank())
-                    ? " a las " + alquiler.getHoraRecojo() + " hrs"
-                    : "";
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                    "No es posible entregar llaves antes de la fecha pactada. Fecha programada: "
-                            + alquiler.getFechaInicio() + horaMsg + ".");
-        }
+        // La hora es la del momento exacto en que se confirma la entrega (con segundos), no la de cuando se abrió la pantalla
+        LocalDateTime ahora = LocalDateTime.now().withNano(0);
+        exigirVentanaDeEntrega(alquiler, ahora);
+
+        garantizarUnidadEnSede(alquiler);
+        VehiculoUnidad unidad = alquiler.getVehiculoUnidad();
+        registrarActaEntrega(alquiler, unidad, req);
+        registrarHorasDeEntrega(alquiler, ahora);
 
         if (alquiler.getGarantiaRetenida() == null && alquiler.getVehiculoModelo() != null) {
             alquiler.setGarantiaRetenida(TarifarioPaulCars.garantiaHoldPorCategoria(alquiler.getVehiculoModelo()));
         }
 
         alquiler.setEstado(estadoAlquiler("ACTIVO"));
-        VehiculoUnidad unidad = alquiler.getVehiculoUnidad();
         unidad.setEstado(estadoVehiculo("EN_RUTA"));
         vehiculoUnidadRepository.save(unidad);
 
-        return alquilerRepository.save(alquiler);
+        Alquiler guardado = alquilerRepository.save(alquiler);
+        // Estado inicial del vehículo: los daños que ya tenía no se le cobran al cliente
+        danoService.registrar(guardado, com.example.alquiler_de_vehiculos.model.DanoVehiculo.ENTREGA, req.danos());
+        eventPublisher.publishEvent(new ComprobanteEvents.EntregaRegistrada(guardado.getIdAlquiler()));
+        return guardado;
+    }
+
+    /**
+     * Antes de entregar, la placa asignada debe estar de verdad en la sede de recojo y lista (no en ruta, mantenimiento ni fuera de
+     * servicio). Si no lo está, se cambia sola por otra libre de la misma sede; si no hay ninguna, se bloquea la entrega y se indica
+     * cancelar con «Vehículo no disponible» (devolución total).
+     */
+    private void garantizarUnidadEnSede(Alquiler alquiler) {
+        VehiculoUnidad u = alquiler.getVehiculoUnidad();
+        String sede = alquiler.getSedeRecojo();
+        String estadoU = u.getEstado() != null ? u.getEstado().getNombreEstado().toUpperCase() : "";
+        boolean listaEnSede = mismaSede(u, sede) && (estadoU.equals("DISPONIBLE") || estadoU.isEmpty());
+        if (listaEnSede) return;
+
+        List<Integer> ocupadas = alquilerRepository.findIdsUnidadesOcupadasEnFechas(alquiler.getFechaInicio(), alquiler.getFechaFinEstimada());
+        VehiculoUnidad otra = vehiculoUnidadRepository.findByVehiculoModelo_IdModelo(alquiler.getVehiculoModelo().getIdModelo()).stream()
+                .filter(x -> !x.getIdUnidad().equals(u.getIdUnidad()))
+                .filter(x -> mismaSede(x, sede))
+                .filter(x -> x.getEstado() != null && "DISPONIBLE".equalsIgnoreCase(x.getEstado().getNombreEstado()))
+                .filter(x -> !ocupadas.contains(x.getIdUnidad()))
+                .findFirst().orElse(null);
+        if (otra != null) {
+            log.info("ALQ-{} cambia de placa {} a {} (la anterior no estaba lista en {})", alquiler.getIdAlquiler(), u.getPlaca(), otra.getPlaca(), sede);
+            alquiler.setVehiculoUnidad(otra);
+            return;
+        }
+        String motivo = !mismaSede(u, sede)
+                ? "la placa " + u.getPlaca() + " está en la sede " + nombreSede(u.getSede())
+                : "la placa " + u.getPlaca() + " no está lista (" + estadoU + ")";
+        throw new ResponseStatusException(HttpStatus.CONFLICT,
+                "No hay un vehículo listo en la sede " + nombreSede(sede) + " para entregar: " + motivo
+                        + ". Cancela la reserva con el motivo «Vehículo no disponible» (devolución del 100 %) u ofrece otro vehículo al cliente.");
+    }
+
+    // Valida y guarda el acta de entrega: documentos, kilometraje, nivel de combustible y conformidad del vehículo
+    private void registrarActaEntrega(Alquiler alquiler, VehiculoUnidad unidad, EntregaRequest req) {
+        if (req == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Completa el acta de entrega (documentos, kilometraje, combustible y conformidad) antes de entregar las llaves");
+        }
+        if (!Boolean.TRUE.equals(req.documentosVerificados())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Debes confirmar que verificaste el DNI y la licencia de conducir del cliente");
+        }
+        // Kilometraje de salida: lectura del odómetro; no puede ser menor al último registrado ni absurdamente mayor
+        Integer km = req.kilometraje();
+        if (km == null || km < 0) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Ingrese el kilometraje de salida (lectura del odómetro del vehículo).");
+        }
+        int kmUnidad = unidad.getKilometraje() != null ? unidad.getKilometraje() : 0;
+        if (km < kmUnidad) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "El kilometraje no puede ser menor al último registrado de la unidad (" + String.format(java.util.Locale.US, "%,d", kmUnidad) + " km).");
+        }
+        if (km - kmUnidad > politica.getKmMaximoSaltoEntrega()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "El kilometraje ingresado supera en más de " + politica.getKmMaximoSaltoEntrega() + " km al último registrado ("
+                            + String.format(java.util.Locale.US, "%,d", kmUnidad) + " km). Verifique la lectura del odómetro.");
+        }
+        if (unidad.kmRestantesMantenimiento() <= 0) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "La unidad alcanzó su kilometraje de mantenimiento (" + String.format(java.util.Locale.US, "%,d", unidad.kmProximoMantenimiento())
+                            + " km) y no puede entregarse hasta que pase por mantenimiento.");
+        }
+        String combustible = nivelCombustible(req.combustible());
+
+        String checklist = req.checklist() == null ? "" : req.checklist().stream()
+                .filter(i -> i != null && !i.isBlank())
+                .map(String::trim)
+                .collect(java.util.stream.Collectors.joining("|"));
+        alquiler.setKmEntrega(km);
+        alquiler.setCombustibleEntrega(combustible);
+        alquiler.setChecklistEntrega(checklist);
+        alquiler.setObservacionesEntrega(null);
+        alquiler.setEntregadoPor(nombreUsuarioActual());
+
+        unidad.actualizarKilometraje(km);
+    }
+
+    // Los correos nunca retrasan la operación: se envían aparte y, si fallan, solo se deja un aviso en el registro
+    private void enSegundoPlano(String descripcion, Runnable envio) {
+        java.util.concurrent.CompletableFuture.runAsync(() -> {
+            try {
+                envio.run();
+            } catch (RuntimeException e) {
+                log.warn("No se pudo enviar el correo ({}): {}", descripcion, e.getMessage());
+            }
+        });
+    }
+
+    /** Avisa al cliente que su solicitud fue aprobada y hasta cuándo tiene para pagar. */
+    private void avisarAprobacion(Alquiler a) {
+        try {
+            if (a.getCliente() == null || a.getCliente().getEmail() == null || a.getFechaInicio() == null) return;
+            LocalTime hora = LocalTime.of(10, 0);
+            try {
+                if (a.getHoraRecojo() != null && !a.getHoraRecojo().isBlank()) hora = LocalTime.parse(a.getHoraRecojo().trim());
+            } catch (DateTimeParseException ignorada) {
+                // se usa la hora por defecto
+            }
+            LocalDateTime recojo = a.getFechaInicio().atTime(hora);
+            LocalDateTime vence = politica.vencimientoPago(LocalDateTime.now(), recojo);
+            var formato = java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy");
+            String fecha = vence.format(java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy 'a las' HH:mm"));
+            String total = a.getPrecioTotal() != null ? String.format(java.util.Locale.US, "S/ %,.2f", a.getPrecioTotal()) : "-";
+            String cuerpo = emailService.parrafo("Hola <strong>" + emailService.escapar(a.getCliente().getNombres()) + "</strong>, aprobamos tu solicitud de reserva. "
+                            + "Para asegurar el vehículo, realiza el pago antes de la fecha límite.")
+                    + emailService.tabla(
+                            new String[] { "Reserva", String.format("ALQ-%06d", a.getIdAlquiler()) },
+                            new String[] { "Vehículo", nombreVehiculo(a.getVehiculoModelo()) },
+                            new String[] { "Recojo", a.getFechaInicio().format(formato) + " - " + hora + " hrs" },
+                            new String[] { "Devolución", a.getFechaFinEstimada() != null ? a.getFechaFinEstimada().format(formato) : "-" },
+                            new String[] { "Total a pagar", total },
+                            new String[] { "Paga hasta", fecha, "destacada" })
+                    + emailService.aviso("Si no recibimos tu pago antes de la fecha límite, la reserva se <strong>cancela automáticamente</strong> y el vehículo se libera para otros clientes.")
+                    + emailService.parrafo("<span style=\"color:#64748b;font-size:13px;\">Puedes pagar en línea con Yape, Plin o tarjeta desde <em>Mis reservas</em>, o en nuestro mostrador.</span>");
+            String html = emailService.plantilla("RESERVA APROBADA", com.example.alquiler_de_vehiculos.service.EmailService.VERDE,
+                    "Tu reserva fue aprobada", cuerpo, "Pagar mi reserva", "/cliente/reservas");
+            final String correo = a.getCliente().getEmail();
+            final String asunto = "Tu reserva fue aprobada: paga hasta el " + fecha + " - Paul Car's";
+            enSegundoPlano("aprobación a " + correo, () -> emailService.enviarHtml(correo, asunto, html));
+        } catch (RuntimeException e) {
+            log.warn("No se pudo avisar al cliente de la aprobación: {}", e.getMessage());
+        }
+    }
+
+    private String nombreUsuarioActual() {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        if (auth == null || auth.getName() == null) return "Counter";
+        return usuarioRepository.findByUsernameIgnoreCase(auth.getName())
+                .map(u -> u.getNombreCompleto() != null && !u.getNombreCompleto().isBlank()
+                        ? u.getNombreCompleto() : u.getUsername())
+                .orElse(auth.getName());
     }
 
     @Transactional
@@ -301,28 +540,163 @@ public class AlquilerService {
                     "Solo se puede finalizar un alquiler en curso (ACTIVO) o con llaves entregadas");
         }
 
-        LocalDate fechaDevolucion = (req != null && req.fechaDevolucion() != null) ? req.fechaDevolucion() : LocalDate.now();
+        // La devolución se registra con la hora exacta en que se confirma la recepción (no se digita)
+        LocalDateTime momentoRecepcion = momentoValido(req.momentoRecepcion());
+        LocalDate fechaDevolucion = momentoRecepcion.toLocalDate();
         VehiculoModelo modelo = alquiler.getVehiculoModelo();
         VehiculoUnidad unidad = alquiler.getVehiculoUnidad();
+        // Daños nuevos encontrados al recibir el vehículo: los moderados y graves lo sacan de servicio hasta repararlo
+        boolean hayDanos = req.danos() != null && !req.danos().isEmpty();
+        boolean danoImportante = hayDanos && req.danos().stream().anyMatch(d -> d != null && d.gravedad() != null
+                && ("MODERADO".equalsIgnoreCase(d.gravedad().trim()) || "GRAVE".equalsIgnoreCase(d.gravedad().trim())));
 
         BigDecimal garantia = alquiler.getGarantiaRetenida() != null
                 ? alquiler.getGarantiaRetenida()
                 : (modelo != null ? TarifarioPaulCars.garantiaHoldPorCategoria(modelo) : BigDecimal.valueOf(3500));
 
         if (unidad != null) {
-            unidad.setEstado(estadoVehiculo("DISPONIBLE"));
+            Integer km = req != null ? req.kilometraje() : null;
+            if (km == null || km < 0) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Ingrese el kilometraje al recibir (lectura del odómetro del vehículo).");
+            }
+            int kmBase = alquiler.getKmEntrega() != null ? alquiler.getKmEntrega() : (unidad.getKilometraje() != null ? unidad.getKilometraje() : 0);
+            if (km < kmBase) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "El kilometraje al recibir no puede ser menor al de la entrega (" + String.format(java.util.Locale.US, "%,d", kmBase) + " km).");
+            }
+            int dias = Math.max(1, alquiler.getDias() != null ? alquiler.getDias() : 1);
+            int tope = dias * politica.getKmMaximoPorDia();
+            if (km - kmBase > tope) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "El kilometraje ingresado implica " + String.format(java.util.Locale.US, "%,d", km - kmBase) + " km recorridos, más de lo razonable para "
+                                + dias + (dias == 1 ? " día" : " días") + " de alquiler (máximo " + String.format(java.util.Locale.US, "%,d", tope) + " km). Verifique la lectura del odómetro.");
+            }
+            String combustible = nivelCombustible(req.combustible());
+
+            alquiler.setKmDevolucion(km);
+            alquiler.setCombustibleDevolucion(combustible);
+
+            // Cargos de la recepción: combustible faltante y retraso
+            var cargos = calcularCargos(alquiler, combustible, momentoRecepcion);
+            alquiler.setCargoCombustible(cargos.cargoCombustible());
+            alquiler.setCargoRetraso(cargos.cargoRetraso());
+            alquiler.setMinutosRetraso(cargos.minutosRetraso());
+
+            unidad.actualizarKilometraje(km);
+            // Si llegó al kilometraje de mantenimiento (o le falta muy poco) queda fuera de servicio: sus reservas futuras pasan
+            // a otra unidad y solo el administrador la habilita cuando el mantenimiento se hizo. Si no, vuelve a estar disponible.
+            if (unidad.kmRestantesMantenimiento() <= politica.getKmMargenMantenimiento()) {
+                try {
+                    cancelacionService.reasignarReservasDeUnidad(unidad,
+                            LocalDateTime.now().plusDays(politica.getDiasReasignarPorBaja()));
+                } catch (ResponseStatusException sinReemplazo) {
+                    // Recibir el vehículo no puede fallar por esto: la reserva queda y el sistema reintenta pasarla a otra placa
+                    log.warn("Unidad {} a mantenimiento sin reemplazo inmediato: {}", unidad.getPlaca(), sinReemplazo.getReason());
+                }
+                unidad.setEstado(estadoVehiculo("MANTENIMIENTO"));
+            } else if (danoImportante) {
+                try {
+                    cancelacionService.reasignarReservasDeUnidad(unidad,
+                            LocalDateTime.now().plusDays(politica.getDiasReasignarPorBaja()));
+                } catch (ResponseStatusException sinReemplazo) {
+                    log.warn("Unidad {} fuera de servicio por daños sin reemplazo inmediato: {}", unidad.getPlaca(), sinReemplazo.getReason());
+                }
+                unidad.setEstado(estadoVehiculo("NO DISPONIBLE"));
+            } else {
+                unidad.setEstado(estadoVehiculo("DISPONIBLE"));
+            }
             vehiculoUnidadRepository.save(unidad);
         }
 
-        alquiler.setEstado(estadoAlquiler("FINALIZADO"));
         alquiler.setFechaFinReal(fechaDevolucion);
         alquiler.setGarantiaRetenida(TarifarioPaulCars.redondear(garantia));
-        alquiler.setGarantiaLiberada(TarifarioPaulCars.redondear(garantia));
-        alquiler.setFechaCheckout(LocalDateTime.now());
+        if (hayDanos) {
+            // Con daños nuevos la garantía queda retenida hasta que el administrador los evalúe
+            alquiler.setEstado(estadoAlquiler("FINALIZADO"));
+            alquiler.setEstadoDanos(DanoService.PENDIENTE);
+            alquiler.setGarantiaLiberada(null);
+        } else {
+            // Los cargos se descuentan de la garantía; lo que no cubre queda como deuda por cobrar
+            BigDecimal totalCargos = TarifarioPaulCars.nz(alquiler.getCargoCombustible())
+                    .add(TarifarioPaulCars.nz(alquiler.getCargoRetraso()));
+            alquiler.setGarantiaLiberada(TarifarioPaulCars.redondear(garantia.subtract(totalCargos).max(BigDecimal.ZERO)));
+            alquiler.setEstado(estadoAlquiler(totalCargos.compareTo(garantia) > 0 ? "CERRADO_CON_DEUDA" : "FINALIZADO"));
+        }
+        alquiler.setFechaCheckout(momentoRecepcion);
         alquiler.setActaObservaciones(req != null && req.observaciones() != null ? req.observaciones().trim() : null);
         alquilerRepository.save(alquiler);
+        if (hayDanos) {
+            danoService.registrar(alquiler, com.example.alquiler_de_vehiculos.model.DanoVehiculo.RECEPCION, req.danos());
+        }
 
         return armarActa(alquiler);
+    }
+
+    private static int cuartos(String nivel) {
+        if (nivel == null) return 4;
+        return switch (nivel.trim().toUpperCase()) {
+            case "3/4" -> 3;
+            case "1/2" -> 2;
+            case "1/4" -> 1;
+            default -> 4;
+        };
+    }
+
+    /** Cargos de combustible y retraso si el vehículo se recibe en este momento con ese nivel de combustible. */
+    public com.example.alquiler_de_vehiculos.dto.CargosPreviosResponse cargosPrevios(Integer idAlquiler, String combustible, LocalDateTime momento) {
+        Alquiler alquiler = buscar(idAlquiler);
+        return calcularCargos(alquiler, combustible, momentoValido(momento));
+    }
+
+    /**
+     * La hora de devolución es la que quedó fija al abrir la pantalla de recepción. Solo se acepta si es razonable
+     * (no futura y de hace menos de 12 horas); si no, se usa la hora actual del servidor.
+     */
+    private static LocalDateTime momentoValido(LocalDateTime pedido) {
+        LocalDateTime ahora = LocalDateTime.now().withNano(0);
+        if (pedido == null || pedido.isAfter(ahora.plusMinutes(2)) || pedido.isBefore(ahora.minusHours(12))) {
+            return ahora;
+        }
+        return pedido.withNano(0);
+    }
+
+    private com.example.alquiler_de_vehiculos.dto.CargosPreviosResponse calcularCargos(Alquiler alquiler, String combustible, LocalDateTime momento) {
+        VehiculoModelo modelo = alquiler.getVehiculoModelo();
+        BigDecimal garantia = alquiler.getGarantiaRetenida() != null ? alquiler.getGarantiaRetenida()
+                : (modelo != null ? TarifarioPaulCars.garantiaHoldPorCategoria(modelo) : BigDecimal.valueOf(3500));
+
+        int faltan = 0;
+        BigDecimal cargoCombustible = BigDecimal.ZERO;
+        if (combustible != null && !combustible.isBlank() && NIVELES_COMBUSTIBLE.contains(combustible.trim().toUpperCase())) {
+            faltan = Math.max(0, cuartos(alquiler.getCombustibleEntrega()) - cuartos(combustible));
+            cargoCombustible = politica.getCombustiblePorCuarto().multiply(BigDecimal.valueOf(faltan));
+        }
+
+        int minutosRetraso = 0;
+        BigDecimal cargoRetraso = BigDecimal.ZERO;
+        if (alquiler.getFechaFinEstimada() != null) {
+            java.time.LocalTime hora = java.time.LocalTime.of(18, 0);
+            try {
+                if (alquiler.getHoraDevolucion() != null && !alquiler.getHoraDevolucion().isBlank()) {
+                    hora = java.time.LocalTime.parse(alquiler.getHoraDevolucion().trim());
+                }
+            } catch (java.time.format.DateTimeParseException ignorada) {
+                // hora con formato inesperado: se usa la de cierre
+            }
+            long tarde = java.time.Duration.between(alquiler.getFechaFinEstimada().atTime(hora), momento).toMinutes();
+            if (tarde > politica.getRetrasoToleranciaMinutos()) {
+                minutosRetraso = (int) tarde;
+                BigDecimal horas = BigDecimal.valueOf((tarde + 59) / 60);
+                BigDecimal porHora = modelo != null && modelo.getPrecioHora() != null ? modelo.getPrecioHora() : BigDecimal.valueOf(25);
+                cargoRetraso = porHora.multiply(horas);
+                // Nunca más que un día completo de alquiler
+                if (modelo != null && modelo.getPrecioDia() != null && cargoRetraso.compareTo(modelo.getPrecioDia()) > 0) {
+                    cargoRetraso = modelo.getPrecioDia();
+                }
+            }
+        }
+        return new com.example.alquiler_de_vehiculos.dto.CargosPreviosResponse(
+                TarifarioPaulCars.redondear(cargoCombustible), faltan, TarifarioPaulCars.redondear(cargoRetraso), minutosRetraso, garantia);
     }
 
     public LiquidacionResponse obtenerActa(Integer idAlquiler) {
@@ -340,8 +714,32 @@ public class AlquilerService {
         if (alquiler.getFechaFinReal() != null) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "El alquiler ya fue finalizado o cancelado");
         }
+        boolean conPagos = pagoRepository.findByAlquiler_IdAlquiler(idAlquiler).stream()
+                .anyMatch(p -> p.getTipoPago() == null || "ALQUILER".equalsIgnoreCase(p.getTipoPago()));
+        if (conPagos) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Esta reserva ya está pagada. Para cancelarla y solicitar la devolución comunícate con Paul Car's.");
+        }
         alquiler.setFechaFinReal(LocalDate.now());
         alquiler.setEstado(estadoAlquiler("CANCELADO"));
+
+        // Queda registrado quién canceló y cuándo (el cliente desde su cuenta, o el personal)
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        boolean esPersonal = auth != null && auth.getAuthorities().stream()
+                .anyMatch(g -> "ROLE_ADMIN".equals(g.getAuthority()) || "ROLE_EMPLEADO".equals(g.getAuthority()));
+        boolean esAdmin = auth != null && auth.getAuthorities().stream().anyMatch(g -> "ROLE_ADMIN".equals(g.getAuthority()));
+        alquiler.setFechaCancelacion(LocalDateTime.now());
+        if (esPersonal) {
+            alquiler.setCanceladoPor(nombreUsuarioActual());
+            alquiler.setCanceladoPorRol(esAdmin ? "ADMINISTRADOR" : "ASESOR");
+        } else {
+            alquiler.setMotivoCancelacion("CLIENTE_SOLICITO");
+            alquiler.setCanceladoPor(alquiler.getCliente() != null
+                    ? ((alquiler.getCliente().getNombres() != null ? alquiler.getCliente().getNombres() : "") + " "
+                    + (alquiler.getCliente().getApellidos() != null ? alquiler.getCliente().getApellidos() : "")).trim()
+                    : nombreUsuarioActual());
+            alquiler.setCanceladoPorRol("CLIENTE");
+        }
 
         if (alquiler.getVehiculoUnidad() != null) {
             VehiculoUnidad u = alquiler.getVehiculoUnidad();
@@ -352,6 +750,21 @@ public class AlquilerService {
         return alquilerRepository.save(alquiler);
     }
 
+
+    /** Todos los cambios de estado registrados (para ordenar la tabla por llegada/salida de un estado). */
+    public List<com.example.alquiler_de_vehiculos.dto.HistorialEstadoDTO> listarHistorialEstados() {
+        return historialRepository.findTodosOrdenados().stream()
+                .map(h -> new com.example.alquiler_de_vehiculos.dto.HistorialEstadoDTO(
+                        h.getAlquiler().getIdAlquiler(), h.getEstadoAnterior(), h.getEstadoNuevo(), h.getFechaHora()))
+                .toList();
+    }
+
+    public List<com.example.alquiler_de_vehiculos.dto.HistorialEstadoDTO> historialDeAlquiler(Integer idAlquiler) {
+        return historialRepository.findByAlquilerOrdenado(idAlquiler).stream()
+                .map(h -> new com.example.alquiler_de_vehiculos.dto.HistorialEstadoDTO(
+                        idAlquiler, h.getEstadoAnterior(), h.getEstadoNuevo(), h.getFechaHora()))
+                .toList();
+    }
 
     public List<Alquiler> listarAlquileres() {
         List<Alquiler> lista = alquilerRepository.findAll();
@@ -408,8 +821,24 @@ public class AlquilerService {
         return new DisponibilidadHorariosDTO(sede, fecha, true, "Horarios disponibles", turnos, fecha, turnos.get(0));
     }
 
+    private static String nombreSede(String sede) {
+        if (sede == null) return "elegida";
+        return sede.toUpperCase().startsWith("AERO") ? "Aeropuerto" : sede.toUpperCase().startsWith("MIRA") ? "Miraflores" : sede;
+    }
+
+    private static boolean mismaSede(VehiculoUnidad u, String sede) {
+        if (sede == null || sede.isBlank()) return true;
+        return u.getSede() != null && nombreSede(u.getSede()).equalsIgnoreCase(nombreSede(sede));
+    }
+
     public int contarStockDisponibleFechas(Integer idModelo, LocalDate inicio, LocalDate fin) {
+        return contarStockDisponibleFechas(idModelo, inicio, fin, null);
+    }
+
+    /** Unidades libres del modelo en esa sede (sin sede = todas). */
+    public int contarStockDisponibleFechas(Integer idModelo, LocalDate inicio, LocalDate fin, String sede) {
         List<VehiculoUnidad> unidadesModelo = vehiculoUnidadRepository.findByVehiculoModelo_IdModelo(idModelo).stream()
+                .filter(u -> mismaSede(u, sede))
                 .filter(u -> u.getEstado() != null
                         && !"MANTENIMIENTO".equalsIgnoreCase(u.getEstado().getNombreEstado())
                         && !"LIMPIEZA".equalsIgnoreCase(u.getEstado().getNombreEstado())
@@ -432,13 +861,7 @@ public class AlquilerService {
                         && !"LIMPIEZA".equalsIgnoreCase(u.getEstado().getNombreEstado())
                         && !"NO DISPONIBLE".equalsIgnoreCase(u.getEstado().getNombreEstado()))
                 .filter(u -> !ocupadas.contains(u.getIdUnidad()))
-                .sorted((u1, u2) -> {
-                    boolean m1 = u1.getSede() != null && u1.getSede().equalsIgnoreCase(sedeRecojo);
-                    boolean m2 = u2.getSede() != null && u2.getSede().equalsIgnoreCase(sedeRecojo);
-                    if (m1 && !m2) return -1;
-                    if (!m1 && m2) return 1;
-                    return 0;
-                })
+                .filter(u -> mismaSede(u, sedeRecojo))
                 .toList();
 
         return candidatas.isEmpty() ? null : candidatas.get(0);
@@ -550,6 +973,12 @@ public class AlquilerService {
     }
 
     private void validarDocumentosCliente(Cliente cliente) {
+        validarDocumentosCliente(cliente, true);
+    }
+
+    // En counter el asesor registra al cliente en persona (el formulario no pide dirección),
+    // por eso la dirección solo se exige en el flujo de reservas en línea.
+    private void validarDocumentosCliente(Cliente cliente, boolean exigirDireccion) {
         if (cliente.getNumeroDocumento() == null || cliente.getNumeroDocumento().isBlank()
                 || cliente.getNumeroDocumento().startsWith("PEND")) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Debes registrar tu documento de identidad (DNI) en Mi Perfil antes de solicitar una reserva.");
@@ -557,7 +986,7 @@ public class AlquilerService {
         if (cliente.getLicenciaConducir() == null || cliente.getLicenciaConducir().isBlank()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Debes registrar tu licencia de conducir en Mi Perfil antes de solicitar una reserva.");
         }
-        if (cliente.getDireccion() == null || cliente.getDireccion().isBlank()) {
+        if (exigirDireccion && (cliente.getDireccion() == null || cliente.getDireccion().isBlank())) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Debes registrar tu dirección de residencia en Mi Perfil antes de solicitar una reserva.");
         }
     }
@@ -593,9 +1022,20 @@ public class AlquilerService {
         }
     }
 
+    /** Las horas de recojo y devolución se eligen en punto o y media (10:00, 10:30), como en el formulario. */
+    private static void exigirHoraEnPuntoOMedia(String hora, String cual) {
+        if (hora == null || hora.isBlank()) return;
+        if (!hora.trim().matches("([01]\\d|2[0-3]):(00|30)")) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "La hora de " + cual + " debe ser en punto o y media (por ejemplo 10:00 o 10:30).");
+        }
+    }
+
     private Alquiler armarAlquiler(Cliente cliente, VehiculoModelo modelo, LocalDate fechaInicio, LocalDate fechaFin,
                                    String sedeRecojo, String sedeDevolucion, String horaRecojo, String horaDevolucion,
                                    boolean seguro, boolean conductor, boolean silla) {
+        exigirHoraEnPuntoOMedia(horaRecojo, "recojo");
+        exigirHoraEnPuntoOMedia(horaDevolucion, "devolución");
         int dias = (int) Math.max(1, ChronoUnit.DAYS.between(fechaInicio, fechaFin));
         BigDecimal precioDia = TarifarioPaulCars.nz(modelo.getPrecioDia());
         BigDecimal base = precioDia.multiply(BigDecimal.valueOf(dias));
@@ -644,7 +1084,21 @@ public class AlquilerService {
                 uni != null && uni.getEstado() != null ? uni.getEstado().getNombreEstado() : "DISPONIBLE",
                 alq.getCliente().getEstadoCliente(),
                 alq.getActaObservaciones(),
-                alq.getFechaCheckout()
+                alq.getFechaCheckout(),
+                uni != null && uni.getEstado() != null && "MANTENIMIENTO".equalsIgnoreCase(uni.getEstado().getNombreEstado()) && alq.getKmDevolucion() != null
+                        ? "La unidad " + uni.getPlaca() + " está a " + String.format(java.util.Locale.US, "%,d", Math.max(0, uni.kmRestantesMantenimiento()))
+                                + " km de su mantenimiento y pasó a Mantenimiento (corresponde cada " + String.format(java.util.Locale.US, "%,d", uni.intervaloMantenimiento()) + " km)."
+                        : null,
+                alq.getCargoCombustible(), alq.getCargoRetraso(), alq.getMinutosRetraso(),
+                DanoService.totalCargos(alq),
+                DanoService.deudaBruta(alq),
+                alq.getEstadoDanos(),
+                TarifarioPaulCars.tieneSeguro(alq.getServiciosExtras()),
+                alq.getCostoDanos(), alq.getCoberturaSeguroPct(), alq.getMontoCubiertoSeguro(), alq.getCargoDanos(),
+                danoService.deudaPagada(alq.getIdAlquiler()),
+                danoService.deudaPendiente(alq),
+                danoService.listar(alq.getIdAlquiler(), com.example.alquiler_de_vehiculos.model.DanoVehiculo.ENTREGA),
+                danoService.listar(alq.getIdAlquiler(), com.example.alquiler_de_vehiculos.model.DanoVehiculo.RECEPCION)
         );
     }
 
@@ -654,13 +1108,16 @@ public class AlquilerService {
                 : "Vehículo";
     }
 
-    private String motivoLegible(String motivo) {
+    /** Causal de rechazo escrita para el cliente: sin datos internos de la empresa. */
+    public static String motivoRechazoParaCliente(String motivo) {
+        if (motivo == null) return "Solicitud no aprobada";
+        // Mismos títulos que ve el asesor al desestimar la solicitud
         return switch (motivo) {
-            case "DNI_NO_COINCIDE" -> "Documento de Identidad no coincide";
-            case "LICENCIA_VENCIDA_INVALIDA" -> "Licencia de conducir no válida o vencida";
-            case "HISTORIAL_NEGATIVO" -> "Observación crediticia o historial de flota";
-            case "SIN_DISPONIBILIDAD_FLOTA", "SIN_STOCK_ALTA_DEMANDA" -> "Agotado por alta demanda";
-            case "INCUMPLIMIENTO_POLITICA_EDAD" -> "Incumplimiento de política de edad (mínimo 21 años)";
+            case "DNI_NO_COINCIDE" -> "Inconsistencia en Documento de Identidad";
+            case "LICENCIA_VENCIDA_INVALIDA" -> "Licencia de Conducir No Vigente";
+            case "HISTORIAL_NEGATIVO" -> "Obligaciones pendientes de un alquiler anterior";
+            case "SIN_DISPONIBILIDAD_FLOTA", "SIN_STOCK_ALTA_DEMANDA" -> "Vehículo no disponible";
+            case "INCUMPLIMIENTO_POLITICA_EDAD" -> "Criterio de Edad o Experiencia Requerida";
             default -> motivo.replace("_", " ");
         };
     }
