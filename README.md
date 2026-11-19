@@ -105,3 +105,7 @@ src/main/java/com/example/alquiler_de_vehiculos/
 ```bash
 ./mvnw test
 ```
+
+## Autor
+
+Proyecto universitario desarrollado por Jeremy Martínez ([@JeremyMartinezx](https://github.com/JeremyMartinezx)).
