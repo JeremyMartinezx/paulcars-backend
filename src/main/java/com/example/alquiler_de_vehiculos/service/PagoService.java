@@ -5,6 +5,7 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
 
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.web.server.ResponseStatusException;
@@ -20,10 +21,9 @@ import com.example.alquiler_de_vehiculos.model.MetodoPago;
 import com.example.alquiler_de_vehiculos.model.Pago;
 import com.example.alquiler_de_vehiculos.repository.AlquilerRepository;
 import com.example.alquiler_de_vehiculos.repository.EstadoAlquilerRepository;
-import com.example.alquiler_de_vehiculos.repository.EstadoVehiculoRepository;
 import com.example.alquiler_de_vehiculos.repository.MetodoPagoRepository;
 import com.example.alquiler_de_vehiculos.repository.PagoRepository;
-import com.example.alquiler_de_vehiculos.repository.VehiculoUnidadRepository;
+import com.example.alquiler_de_vehiculos.util.ComprobanteEvents;
 import com.example.alquiler_de_vehiculos.util.TarifarioPaulCars;
 
 import jakarta.transaction.Transactional;
@@ -35,21 +35,21 @@ public class PagoService {
     private final AlquilerRepository alquilerRepository;
     private final MetodoPagoRepository metodoPagoRepository;
     private final EstadoAlquilerRepository estadoAlquilerRepository;
-    private final EstadoVehiculoRepository estadoVehiculoRepository;
-    private final VehiculoUnidadRepository vehiculoUnidadRepository;
+    private final ApplicationEventPublisher eventPublisher;
+    private final com.example.alquiler_de_vehiculos.repository.UsuarioRepository usuarioRepository;
 
     public PagoService(PagoRepository pagoRepository,
                        AlquilerRepository alquilerRepository,
                        MetodoPagoRepository metodoPagoRepository,
                        EstadoAlquilerRepository estadoAlquilerRepository,
-                       EstadoVehiculoRepository estadoVehiculoRepository,
-                       VehiculoUnidadRepository vehiculoUnidadRepository) {
+                       ApplicationEventPublisher eventPublisher,
+                       com.example.alquiler_de_vehiculos.repository.UsuarioRepository usuarioRepository) {
+        this.usuarioRepository = usuarioRepository;
         this.pagoRepository = pagoRepository;
         this.alquilerRepository = alquilerRepository;
         this.metodoPagoRepository = metodoPagoRepository;
         this.estadoAlquilerRepository = estadoAlquilerRepository;
-        this.estadoVehiculoRepository = estadoVehiculoRepository;
-        this.vehiculoUnidadRepository = vehiculoUnidadRepository;
+        this.eventPublisher = eventPublisher;
     }
 
     @Transactional
@@ -121,8 +121,24 @@ public class PagoService {
             if (req.numeroOperacion() == null || req.numeroOperacion().isBlank()) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Ingresa el número de operación del voucher POS");
             }
+            String marca = req.marcaTarjeta() != null ? req.marcaTarjeta().trim().toUpperCase() : "";
+            if (!java.util.Set.of("VISA", "MASTERCARD", "AMEX", "DINERS", "OTRA").contains(marca)) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Selecciona la marca de la tarjeta");
+            }
+            String autorizacion = req.numeroAutorizacion() != null ? req.numeroAutorizacion().trim().toUpperCase() : "";
+            if (!autorizacion.matches("[A-Z0-9]{4,12}")) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "Ingresa el número de autorización del voucher (4 a 12 caracteres)");
+            }
+            // En POS el número de voucher se repite entre terminales; lo que no debe repetirse es la autorización
+            if (pagoRepository.existsByNumeroAutorizacionIgnoreCase(autorizacion)) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT,
+                        "Ese número de autorización ya fue registrado en otro cobro. Verifica el voucher.");
+            }
             pago.setUltimosDigitos(digitos);
             pago.setNumeroOperacion(req.numeroOperacion().trim());
+            pago.setMarcaTarjeta(marca);
+            pago.setNumeroAutorizacion(autorizacion);
         } else {
             if (req.bancoOrigen() == null || req.bancoOrigen().isBlank()) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Ingresa el banco o billetera de origen");
@@ -130,35 +146,43 @@ public class PagoService {
             if (req.numeroOperacion() == null || req.numeroOperacion().isBlank()) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Ingresa el código de operación");
             }
+            // Un mismo código de operación no puede sustentar dos cobros
+            if (pagoRepository.existsByNumeroOperacionIgnoreCase(req.numeroOperacion().trim())) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT,
+                        "Ese código de operación ya fue usado en otro cobro. Verifica el comprobante del cliente.");
+            }
             pago.setBancoOrigen(req.bancoOrigen().trim());
             pago.setNumeroOperacion(req.numeroOperacion().trim());
         }
 
         pago.setCanal("COUNTER");
+        pago.setRegistradoPor(nombreUsuarioActual());
         pago.setValidadoPor("COUNTER_PRESENCIAL");
         pago.setFechaValidacion(LocalDateTime.now());
         Pago guardado = pagoRepository.save(pago);
+        eventPublisher.publishEvent(new ComprobanteEvents.PagoRegistrado(guardado.getIdPago()));
 
         if (Boolean.TRUE.equals(req.garantiaConfirmada()) && alquiler.getGarantiaRetenida() == null) {
             alquiler.setGarantiaRetenida(TarifarioPaulCars.garantiaHoldPorCategoria(alquiler.getVehiculo()));
         }
         if ("RESERVADO".equals(estado) || "PAGADO".equals(estado)) {
-            LocalDate hoy = LocalDate.now();
-            boolean esHoyOPasado = alquiler.getFechaInicio() != null && !alquiler.getFechaInicio().isAfter(hoy);
-            if (esHoyOPasado && alquiler.getGarantiaRetenida() != null) {
-                estadoAlquilerRepository.findByNombreEstadoIgnoreCase("ACTIVO").ifPresent(alquiler::setEstado);
-                if (alquiler.getVehiculoUnidad() != null) {
-                    estadoVehiculoRepository.findByNombreEstadoIgnoreCase("EN_RUTA").ifPresent(est -> {
-                        alquiler.getVehiculoUnidad().setEstado(est);
-                        vehiculoUnidadRepository.save(alquiler.getVehiculoUnidad());
-                    });
-                }
-            } else {
-                estadoAlquilerRepository.findByNombreEstadoIgnoreCase("PAGADO").ifPresent(alquiler::setEstado);
-            }
+            // Cobrar NO entrega el vehículo: el paso a "En ruta" solo ocurre al registrar el acta de entrega
+            // (verificación de documentos, kilometraje, combustible y checklist) en entregarLlaves().
+            estadoAlquilerRepository.findByNombreEstadoIgnoreCase("PAGADO").ifPresent(alquiler::setEstado);
         }
         alquilerRepository.save(alquiler);
         return guardado;
+    }
+
+    /** Nombre del asesor autenticado que registra el cobro. */
+    private String nombreUsuarioActual() {
+        org.springframework.security.core.Authentication auth =
+                org.springframework.security.core.context.SecurityContextHolder.getContext().getAuthentication();
+        if (auth == null || auth.getName() == null) return "Counter";
+        return usuarioRepository.findByUsernameIgnoreCase(auth.getName())
+                .map(u -> u.getNombreCompleto() != null && !u.getNombreCompleto().isBlank()
+                        ? u.getNombreCompleto() : u.getUsername())
+                .orElse(auth.getName());
     }
 
     public BigDecimal saldoContrato(Alquiler alquiler) {
@@ -229,7 +253,8 @@ public class PagoService {
         pago.setNumeroOperacion(trxId);
         pago.setValidadoPor("YAPE_GATEWAY_CULQI");
         pago.setFechaValidacion(LocalDateTime.now());
-        pagoRepository.save(pago);
+        Pago pagoGuardado = pagoRepository.save(pago);
+        eventPublisher.publishEvent(new ComprobanteEvents.PagoRegistrado(pagoGuardado.getIdPago()));
 
         marcarAlquilerPagado(alquiler);
         String nuevoEstado = "PAGADO";
@@ -241,7 +266,8 @@ public class PagoService {
                 "YAPE",
                 monto,
                 alquiler.getIdAlquiler(),
-                nuevoEstado
+                nuevoEstado,
+                pagoGuardado.getIdPago()
         );
     }
 
@@ -271,7 +297,8 @@ public class PagoService {
         pago.setNumeroOperacion(trxId);
         pago.setValidadoPor("PLIN_GATEWAY_INTEROPERABLE");
         pago.setFechaValidacion(LocalDateTime.now());
-        pagoRepository.save(pago);
+        Pago pagoGuardado = pagoRepository.save(pago);
+        eventPublisher.publishEvent(new ComprobanteEvents.PagoRegistrado(pagoGuardado.getIdPago()));
 
         marcarAlquilerPagado(alquiler);
         String nuevoEstado = "PAGADO";
@@ -283,7 +310,8 @@ public class PagoService {
                 "PLIN",
                 monto,
                 alquiler.getIdAlquiler(),
-                nuevoEstado
+                nuevoEstado,
+                pagoGuardado.getIdPago()
         );
     }
 
@@ -326,7 +354,8 @@ public class PagoService {
         pago.setNumeroOperacion(trxId);
         pago.setValidadoPor("CULQI_GATEWAY_PCI_DSS");
         pago.setFechaValidacion(LocalDateTime.now());
-        pagoRepository.save(pago);
+        Pago pagoGuardado = pagoRepository.save(pago);
+        eventPublisher.publishEvent(new ComprobanteEvents.PagoRegistrado(pagoGuardado.getIdPago()));
 
         marcarAlquilerPagado(alquiler);
         String nuevoEstado = "PAGADO";
@@ -338,7 +367,8 @@ public class PagoService {
                 "TARJETA",
                 monto,
                 alquiler.getIdAlquiler(),
-                nuevoEstado
+                nuevoEstado,
+                pagoGuardado.getIdPago()
         );
     }
 }
