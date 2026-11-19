@@ -31,6 +31,36 @@ public class VehiculoController {
 
     private final VehiculoService vehiculoService;
     private final com.example.alquiler_de_vehiculos.service.AlquilerService alquilerService;
+    private final com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper()
+            .findAndRegisterModules();
+
+    /** El personal (ADMIN y EMPLEADO) ve todo; visitantes y clientes solo reciben lo necesario para el catálogo. */
+    private boolean esPersonal() {
+        org.springframework.security.core.Authentication a = org.springframework.security.core.context.SecurityContextHolder.getContext().getAuthentication();
+        return a != null && a.getAuthorities().stream()
+                .anyMatch(g -> "ROLE_ADMIN".equals(g.getAuthority()) || "ROLE_EMPLEADO".equals(g.getAuthority()));
+    }
+
+    @SuppressWarnings("unchecked")
+    private Object visible(VehiculoModelo m) {
+        if (esPersonal()) return m;
+        Map<String, Object> mapa = mapper.convertValue(m, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
+        Object u = mapa.get("unidades");
+        if (u instanceof List<?> lista) {
+            List<Map<String, Object>> limpias = new java.util.ArrayList<>();
+            for (Object o : lista) {
+                Map<String, Object> un = (Map<String, Object>) o;
+                Map<String, Object> corto = new java.util.LinkedHashMap<>();
+                corto.put("sede", un.get("sede"));
+                corto.put("color", un.get("color"));
+                Object est = un.get("estado");
+                if (est instanceof Map<?, ?> em) corto.put("estado", Map.of("nombreEstado", String.valueOf(em.get("nombreEstado"))));
+                limpias.add(corto);
+            }
+            mapa.put("unidades", limpias);
+        }
+        return mapa;
+    }
 
     public VehiculoController(VehiculoService vehiculoService,
                               com.example.alquiler_de_vehiculos.service.AlquilerService alquilerService) {
@@ -57,17 +87,16 @@ public class VehiculoController {
 
 
     @GetMapping
-    public List<VehiculoModelo> obtenerTodos(@RequestParam(required = false) String sede) {
-        if (sede != null && !sede.trim().isEmpty()) {
-            return vehiculoService.getAllVehiculos(sede);
-        }
-        return vehiculoService.getAllVehiculos();
+    public List<Object> obtenerTodos(@RequestParam(required = false) String sede) {
+        List<VehiculoModelo> lista = (sede != null && !sede.trim().isEmpty())
+                ? vehiculoService.getAllVehiculos(sede) : vehiculoService.getAllVehiculos();
+        return lista.stream().map(this::visible).toList();
     }
 
     @GetMapping("/{id}")
-    public ResponseEntity<VehiculoModelo> obtenerPorId(@PathVariable Integer id) {
+    public ResponseEntity<Object> obtenerPorId(@PathVariable Integer id) {
         return vehiculoService.getVehiculoById(id)
-                .map(ResponseEntity::ok)
+                .map(m -> ResponseEntity.ok(visible(m)))
                 .orElseGet(() -> ResponseEntity.notFound().build());
     }
 
