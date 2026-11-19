@@ -163,7 +163,7 @@ public class UsuarioService {
         Usuario usuario = usuarioRepository.findById(idUsuario)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Usuario no encontrado"));
 
-        if ("admin@paulcars.com".equalsIgnoreCase(usuario.getUsername()) || idUsuario.equals(1)) {
+        if (idUsuario.equals(1)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "No es posible eliminar la cuenta principal de Administrador.");
         }
 
