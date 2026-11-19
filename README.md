@@ -4,7 +4,7 @@ API REST del sistema de alquiler de vehículos **Paul Car's** (Lima, Perú), con
 
 ## Tecnologías
 
-- Java 20 · Spring Boot 4 (Web MVC, Data JPA, Security, Validation, Mail, Cache con Caffeine)
+- Java 21 · Spring Boot 4 (Web MVC, Data JPA, Security, Validation, Mail, Cache con Caffeine)
 - MySQL 8 (en la nube: compatible con TiDB Cloud)
 - JWT (access + refresh) y límite de intentos en el login
 - OpenAPI / Swagger (`/swagger-ui.html`)
@@ -30,7 +30,7 @@ API REST del sistema de alquiler de vehículos **Paul Car's** (Lima, Perú), con
 
 ## Requisitos
 
-- JDK 20 o superior
+- JDK 21 o superior
 - MySQL 8 local o remoto
 
 ## Puesta en marcha local
