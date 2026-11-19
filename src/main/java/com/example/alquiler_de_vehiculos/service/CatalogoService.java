@@ -16,6 +16,7 @@ import com.example.alquiler_de_vehiculos.repository.MarcaRepository;
 import com.example.alquiler_de_vehiculos.repository.MetodoPagoRepository;
 import com.example.alquiler_de_vehiculos.repository.ModeloRepository;
 import com.example.alquiler_de_vehiculos.repository.TipoVehiculoRepository;
+import com.example.alquiler_de_vehiculos.repository.VehiculoModeloRepository;
 
 import jakarta.transaction.Transactional;
 
@@ -27,17 +28,63 @@ public class CatalogoService {
     private final TipoVehiculoRepository tipoVehiculoRepository;
     private final CombustibleRepository combustibleRepository;
     private final MetodoPagoRepository metodoPagoRepository;
+    private final VehiculoModeloRepository vehiculoModeloRepository;
 
     public CatalogoService(MarcaRepository marcaRepository,
                            ModeloRepository modeloRepository,
                            TipoVehiculoRepository tipoVehiculoRepository,
                            CombustibleRepository combustibleRepository,
-                           MetodoPagoRepository metodoPagoRepository) {
+                           MetodoPagoRepository metodoPagoRepository,
+                           VehiculoModeloRepository vehiculoModeloRepository) {
+        this.vehiculoModeloRepository = vehiculoModeloRepository;
         this.marcaRepository = marcaRepository;
         this.modeloRepository = modeloRepository;
         this.tipoVehiculoRepository = tipoVehiculoRepository;
         this.combustibleRepository = combustibleRepository;
         this.metodoPagoRepository = metodoPagoRepository;
+    }
+
+    // ───────── Borrar: solo lo que ningún vehículo está usando ─────────
+
+    @Transactional
+    public void eliminarModelo(Integer id) {
+        Modelo modelo = modeloRepository.findById(id).orElseThrow(() -> noEncontrado("Modelo"));
+        if (modelo.getMarca() != null && vehiculoModeloRepository.existsByMarca_IdMarcaAndNombreModeloIgnoreCase(
+                modelo.getMarca().getIdMarca(), modelo.getModelo())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "No se puede eliminar: ya existe un vehículo creado con este modelo.");
+        }
+        modeloRepository.delete(modelo);
+    }
+
+    @Transactional
+    public void eliminarMarca(Integer id) {
+        Marca marca = marcaRepository.findById(id).orElseThrow(() -> noEncontrado("Marca"));
+        if (modeloRepository.existsByMarca_IdMarca(id) || vehiculoModeloRepository.existsByMarca_IdMarca(id)) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "No se puede eliminar: esta marca tiene modelos o vehículos asociados.");
+        }
+        marcaRepository.delete(marca);
+    }
+
+    @Transactional
+    public void eliminarTipoVehiculo(Integer id) {
+        TipoVehiculo tipo = tipoVehiculoRepository.findById(id).orElseThrow(() -> noEncontrado("Tipo de vehículo"));
+        if (vehiculoModeloRepository.existsByTipo_IdTipo(id)) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "No se puede eliminar: hay vehículos de este tipo.");
+        }
+        tipoVehiculoRepository.delete(tipo);
+    }
+
+    @Transactional
+    public void eliminarCombustible(Integer id) {
+        Combustible combustible = combustibleRepository.findById(id).orElseThrow(() -> noEncontrado("Combustible"));
+        if (vehiculoModeloRepository.existsByCombustible_IdCombustible(id)) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "No se puede eliminar: hay vehículos que usan este combustible.");
+        }
+        combustibleRepository.delete(combustible);
     }
 
     public List<Marca> listarMarcas() {
