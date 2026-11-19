@@ -19,7 +19,7 @@ import java.util.List;
 @Configuration
 public class CorsConfig {
 
-    @Value("${CORS_ORIGINS:http://localhost:4200,http://127.0.0.1:4200}")
+    @Value("${CORS_ORIGINS:http://localhost:4200,http://127.0.0.1:4200,https://paulcars-frontend.vercel.app}")
     private String corsOrigins;
 
     @Bean
@@ -36,8 +36,7 @@ public class CorsConfig {
         // Soporte adicional para URLs de preview/producción en Vercel
         configuration.setAllowedOriginPatterns(List.of(
                 "http://localhost:[*]",
-                "http://127.0.0.1:[*]",
-                "https://*.vercel.app"
+                "http://127.0.0.1:[*]"
         ));
 
         configuration.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS"));

@@ -103,9 +103,10 @@ public class SecurityConfig {
                     .requestMatchers(HttpMethod.POST, "/api/auth/logout").authenticated();
 
                 // Catálogo y recursos estáticos públicos para visualización
+                // (el detalle de unidades por placa, con VIN y kilometraje, queda solo para el personal)
                 auth.requestMatchers(HttpMethod.GET,
                         "/api/vehiculos",
-                        "/api/vehiculos/**",
+                        "/api/vehiculos/*",
                         "/api/catalogos",
                         "/api/catalogos/**",
                         "/images/**",
@@ -114,7 +115,7 @@ public class SecurityConfig {
 
                 // Creación de cliente y reserva pública desde el portal
                 auth.requestMatchers(HttpMethod.POST, "/api/clientes", "/api/alquileres").permitAll();
-                auth.requestMatchers(HttpMethod.POST, "/api/pagos/yape", "/api/pagos/plin", "/api/pagos/tarjeta").permitAll();
+                auth.requestMatchers(HttpMethod.POST, "/api/pagos/yape", "/api/pagos/plin", "/api/pagos/tarjeta").authenticated();
 
                 // Área privada del cliente logueado
                 auth.requestMatchers(HttpMethod.GET, "/api/auth/me", "/api/alquileres/mis-alquileres", "/api/cambios").authenticated();
