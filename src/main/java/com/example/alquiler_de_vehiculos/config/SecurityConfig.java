@@ -96,6 +96,7 @@ public class SecurityConfig {
                 }
 
                 // Monitoreo operativo básico público, métricas sensibles restringidas
+                auth.requestMatchers(HttpMethod.GET, "/").permitAll();
                 auth.requestMatchers("/actuator/health", "/actuator/info").permitAll()
                     .requestMatchers("/actuator/**").hasRole("ADMIN");
 
