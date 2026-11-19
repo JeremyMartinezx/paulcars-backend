@@ -23,7 +23,9 @@ import com.example.alquiler_de_vehiculos.dto.RegistroRequest;
 import com.example.alquiler_de_vehiculos.model.Cliente;
 import com.example.alquiler_de_vehiculos.model.Rol;
 import com.example.alquiler_de_vehiculos.model.Usuario;
+import com.example.alquiler_de_vehiculos.model.NotificacionLeida;
 import com.example.alquiler_de_vehiculos.repository.ClienteRepository;
+import com.example.alquiler_de_vehiculos.repository.NotificacionLeidaRepository;
 import com.example.alquiler_de_vehiculos.repository.RolRepository;
 import com.example.alquiler_de_vehiculos.repository.UsuarioRepository;
 import com.example.alquiler_de_vehiculos.security.CustomUserDetailService;
@@ -45,6 +47,10 @@ public class AuthService {
     private final CustomUserDetailService userDetailsService;
     private final JwtService jwtService;
     private final EmailService emailService;
+    private final NotificacionLeidaRepository leidaRepository;
+
+    /** Marca que el usuario ya inició sesión más de una vez: la notificación de bienvenida deja de mostrarse. */
+    public static final String CLAVE_BIENVENIDA_FIN = "CLI-BIENVENIDA-FIN";
 
     public AuthService(UsuarioRepository usuarioRepository,
                        RolRepository rolRepository,
@@ -53,7 +59,9 @@ public class AuthService {
                        AuthenticationManager authenticationManager,
                        CustomUserDetailService userDetailsService,
                        JwtService jwtService,
-                       EmailService emailService) {
+                       EmailService emailService,
+                       NotificacionLeidaRepository leidaRepository) {
+        this.leidaRepository = leidaRepository;
         this.usuarioRepository = usuarioRepository;
         this.rolRepository = rolRepository;
         this.clienteRepository = clienteRepository;
@@ -143,6 +151,10 @@ public class AuthService {
                 throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Credenciales inválidas");
             }
         }
+        if (usuario.getUltimoAcceso() != null
+                && !leidaRepository.existsByUsernameAndClave(usuario.getUsername(), CLAVE_BIENVENIDA_FIN)) {
+            leidaRepository.save(new NotificacionLeida(usuario.getUsername(), CLAVE_BIENVENIDA_FIN));
+        }
         usuario.setUltimoAcceso(LocalDateTime.now());
         usuarioRepository.save(usuario);
         return respuesta(userDetails, usuario.getRol());
@@ -178,7 +190,30 @@ public class AuthService {
         Usuario usuario = usuarioRepository.findByUsernameIgnoreCase(username)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Usuario no encontrado"));
         String rol = usuario.getRol() != null ? usuario.getRol().getNombreRol().toUpperCase() : "";
-        return new MeResponse(usuario.getUsername(), rol, nombreVisible(usuario), correoVisible(usuario));
+        return new MeResponse(usuario.getUsername(), rol, nombreVisible(usuario), correoVisible(usuario),
+                usuario.getNombres(), usuario.getApellidos(), usuario.getDni());
+    }
+
+    /** El personal corrige sus propios nombres, apellidos y DNI; el nombre completo se arma con ellos. */
+    @org.springframework.transaction.annotation.Transactional
+    public MeResponse actualizarPerfilPersonal(String username, com.example.alquiler_de_vehiculos.dto.PerfilPersonalRequest req) {
+        Usuario usuario = usuarioRepository.findByUsernameIgnoreCase(username)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Usuario no encontrado"));
+        String nombres = req.nombres() == null ? "" : req.nombres().trim();
+        String apellidos = req.apellidos() == null ? "" : req.apellidos().trim();
+        String dni = req.dni() == null ? "" : req.dni().trim();
+        if (nombres.isEmpty() || apellidos.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Ingrese sus nombres y apellidos.");
+        }
+        if (!dni.matches("\\d{8}")) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "El DNI debe tener 8 dígitos.");
+        }
+        usuario.setNombres(nombres);
+        usuario.setApellidos(apellidos);
+        usuario.setDni(dni);
+        usuario.setNombreCompleto(nombres + " " + apellidos);
+        usuarioRepository.save(usuario);
+        return perfilSesion(username);
     }
 
     private String nombreVisible(Usuario usuario) {
