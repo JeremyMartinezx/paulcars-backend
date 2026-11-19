@@ -119,6 +119,32 @@ public class AuthService {
         return respuesta(userDetails, rol);
     }
 
+    /** Bloqueo temporal tras varias contraseñas incorrectas seguidas (por usuario, en memoria). */
+    private static final int MAX_FALLOS_LOGIN = 5;
+    private static final long BLOQUEO_LOGIN_MS = 15 * 60 * 1000L;
+    private static final class FalloLogin { int fallos; long ultimoFallo; long bloqueadoHasta; }
+    private final Map<String, FalloLogin> fallosLogin = new ConcurrentHashMap<>();
+
+    private void verificarBloqueo(String usuario) {
+        FalloLogin f = fallosLogin.get(usuario.toLowerCase());
+        if (f != null && f.bloqueadoHasta > System.currentTimeMillis()) {
+            long min = Math.max(1, (f.bloqueadoHasta - System.currentTimeMillis() + 59_999) / 60_000);
+            throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS,
+                    "Demasiados intentos fallidos. Por seguridad la cuenta está bloqueada " + min + " min. Intente más tarde o recupere su contraseña.");
+        }
+    }
+
+    private void registrarFallo(String usuario) {
+        long ahora = System.currentTimeMillis();
+        FalloLogin f = fallosLogin.computeIfAbsent(usuario.toLowerCase(), k -> new FalloLogin());
+        synchronized (f) {
+            if (ahora - f.ultimoFallo > BLOQUEO_LOGIN_MS) f.fallos = 0;
+            f.fallos++;
+            f.ultimoFallo = ahora;
+            if (f.fallos >= MAX_FALLOS_LOGIN) { f.bloqueadoHasta = ahora + BLOQUEO_LOGIN_MS; f.fallos = 0; }
+        }
+    }
+
     @Transactional
     public AuthResponse login(LoginRequest request) {
         String cleanUser = request.username() != null ? request.username().trim() : "";
@@ -126,7 +152,14 @@ public class AuthService {
         if (cleanUser.matches("^[0-9]+$")) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "No está permitido iniciar sesión con DNI. Ingrese con su correo electrónico.");
         }
-        UserDetails userDetails = userDetailsService.loadUserByUsername(cleanUser);
+        verificarBloqueo(cleanUser);
+        UserDetails userDetails;
+        try {
+            userDetails = userDetailsService.loadUserByUsername(cleanUser);
+        } catch (RuntimeException e) {
+            registrarFallo(cleanUser);
+            throw e;
+        }
         Usuario usuario = usuarioRepository.findByUsernameIgnoreCase(userDetails.getUsername())
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Credenciales inválidas"));
 
@@ -148,9 +181,11 @@ public class AuthService {
                 authenticationManager.authenticate(
                         new UsernamePasswordAuthenticationToken(userDetails.getUsername(), cleanPassword));
             } catch (Exception e) {
+                registrarFallo(cleanUser);
                 throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Credenciales inválidas");
             }
         }
+        fallosLogin.remove(cleanUser.toLowerCase());
         if (usuario.getUltimoAcceso() != null
                 && !leidaRepository.existsByUsernameAndClave(usuario.getUsername(), CLAVE_BIENVENIDA_FIN)) {
             leidaRepository.save(new NotificacionLeida(usuario.getUsername(), CLAVE_BIENVENIDA_FIN));
