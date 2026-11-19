@@ -57,6 +57,13 @@ public class AuthController {
         return authService.perfilSesion(authentication.getName());
     }
 
+    @org.springframework.web.bind.annotation.PutMapping("/me/perfil")
+    @Operation(summary = "Corregir los datos propios del personal", description = "Nombres, apellidos y DNI del administrador o asesor autenticado")
+    public MeResponse actualizarPerfilPersonal(Authentication authentication,
+                                               @RequestBody com.example.alquiler_de_vehiculos.dto.PerfilPersonalRequest request) {
+        return authService.actualizarPerfilPersonal(authentication.getName(), request);
+    }
+
     @PostMapping("/recuperar-password/solicitar-codigo")
     @Operation(summary = "Solicitud de código OTP", description = "Envía código de seguridad al correo registrado")
     public ResponseEntity<Map<String, Object>> solicitarCodigoRecuperacion(@RequestBody Map<String, String> body) {
